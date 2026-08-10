@@ -1,0 +1,47 @@
+Cargo.toml
+  s_a9b411f01a317b::t_fc8351689e370f 30-31,39
+Dockerfile.unified
+  s_a9b411f01a317b::t_c3b8a6ae72f2f8 16-19,68-72,466-505
+README.md
+  s_a9b411f01a317b::t_325858474d8451 9,55,105-111,185-186,247-252,301-310
+config.toml.example
+  s_a9b411f01a317b::t_c180ebea11921c 1-2,49-64
+crates/openab-core/Cargo.toml
+  s_a9b411f01a317b::t_419dd296dd7d6e 65,68
+crates/openab-core/src/config.rs
+  s_a9b411f01a317b::t_0cb30649b87845 239,647-687,3827-3868
+crates/openab-core/src/cron.rs
+  s_a9b411f01a317b::t_ae4a561fc1ff97 241-248,1676-1684
+crates/openab-core/src/lib.rs
+  s_a9b411f01a317b::t_1504e87b74ae02 37-38
+crates/openab-core/src/mattermost.rs
+  s_a9b411f01a317b::t_0b06ca691ce7c8 1-1114
+crates/openab-core/src/timestamp.rs
+  s_a9b411f01a317b::t_a8fe01a01b30a2 47-52,110-117
+docs/config-reference.md
+  s_a9b411f01a317b::t_27a2bb1991d284 5,114-138
+docs/cronjob.md
+  s_a9b411f01a317b::t_383b67623f6856 47,49,348
+docs/local-dev.md
+  s_a9b411f01a317b::t_4a1a4f848640b4 54
+docs/mattermost.md
+  s_a9b411f01a317b::t_af855924b40572 1-100
+src/main.rs
+  s_a9b411f01a317b::t_93a354f97a470d 34-35,76,416,423,446-453,724-742,907,979-991,1010-1016,1038-1040,1134-1212,1722-1728,1928-1930
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "4e74e5101aece596eba4f030363a22c826448207",
+  "prompts": {},
+  "sessions": {
+    "s_a9b411f01a317b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fea07-01de-7d91-843c-cf18a0aa595a",
+        "model": "unknown"
+      },
+      "human_author": "shangzy <luxiaofeng_poop@163.com>"
+    }
+  }
+}
