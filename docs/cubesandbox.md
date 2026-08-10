@@ -113,6 +113,47 @@ Do not create sandboxes from a template until its status is `READY`. If the
 registry is private, pass `registryUsername` and `registryPassword` in the
 same JSON request (or publish to a registry reachable by the Cube node).
 
+## Register the same templates with `cubemastercli`
+
+`cubemastercli` is the direct CubeMaster client. It does not use the
+CubeAPI bearer key; point its global `--address`/`--port` flags at the
+CubeMaster service (the default port is `8089`). The command below is
+equivalent to the REST request above and submits asynchronously:
+
+```bash
+cubemastercli \
+  --address 192.168.104.116 \
+  --port 8089 \
+  tpl create-from-image \
+  --image "${OPENAB_CUBE_REGISTRY}:${OPENAB_CUBE_TAG}-opencode" \
+  --writable-layer-size 4G \
+  --expose-port 49983 \
+  --probe 49983 \
+  --probe-path /health \
+  --cmd /usr/bin/envd \
+  --arg=-port \
+  --arg=49983 \
+  --detach
+```
+
+Repeat with `-claude` and `-codex`. For a private registry, add
+`--registry-username "$REGISTRY_USERNAME"` and
+`--registry-password "$REGISTRY_PASSWORD"`. The CLI prints `job_id` and
+`template_id`; monitor and inspect them with:
+
+```bash
+cubemastercli --address 192.168.104.116 --port 8089 \
+  tpl watch --job-id <job-id>
+cubemastercli --address 192.168.104.116 --port 8089 \
+  tpl info <template-id> --json --include-request
+cubemastercli --address 192.168.104.116 --port 8089 tpl list -o wide
+```
+
+The important CLI-to-API field mapping is: `--image` → `image`, repeated
+`--expose-port` → `exposedPorts`, `--probe`/`--probe-path` → `probePort`/
+`probePath`, `--cmd`/`--arg` → `command`/`args`, and
+`--writable-layer-size` → `writableLayerSize`.
+
 ## Configure a sandbox
 
 Create a sandbox from the chosen template with `POST /sandboxes` (or use the
