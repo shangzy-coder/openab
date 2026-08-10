@@ -1,0 +1,23 @@
+Dockerfile.claude
+  s_a9b411f01a317b::t_05353ce3112961 28
+Dockerfile.opencode
+  s_a9b411f01a317b::t_476822e2d6d331 50
+Dockerfile.unified
+  s_a9b411f01a317b::t_cbc14a5ce5a1cc 142,352
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "906c444f8bcbf8a4cce3d1a7bfa834aae2fccb1d",
+  "prompts": {},
+  "sessions": {
+    "s_a9b411f01a317b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fea07-01de-7d91-843c-cf18a0aa595a",
+        "model": "unknown"
+      },
+      "human_author": "shangzy <luxiaofeng_poop@163.com>"
+    }
+  }
+}
