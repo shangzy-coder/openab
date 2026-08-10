@@ -47,7 +47,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 # Install opencode
 ARG OPENCODE_VERSION=1.17.9
-RUN npm install -g opencode-ai@${OPENCODE_VERSION} --retry 3
+RUN npm install -g opencode-ai@${OPENCODE_VERSION} --fetch-retries=3
 
 # Install gh CLI (matches Dockerfile.claude / Dockerfile.gemini / Dockerfile.codex)
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
