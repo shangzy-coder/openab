@@ -44,9 +44,9 @@ thread_id = ""                               # optional: post to existing thread
 |-------|----------|---------|-------------|
 | `enabled` | | `true` | Set `false` to disable without removing the entry |
 | `schedule` | ✅ | — | 5-field POSIX cron expression |
-| `channel` | ✅ | — | Discord channel/thread ID, Slack channel ID, Telegram chat ID, Google Chat space name, or LINE WORKS channel ID / `user:<userId>` |
+| `channel` | ✅ | — | Discord channel/thread ID, Slack channel ID, Mattermost channel ID, Telegram chat ID, Google Chat space name, or LINE WORKS channel ID / `user:<userId>` |
 | `message` | ✅ | — | Message sent to the agent as a prompt |
-| `platform` | | `"discord"` | `"discord"`, `"slack"`, `"telegram"`, `"googlechat"`, or `"lineworks"` (non-default platforms require their feature) |
+| `platform` | | `"discord"` | `"discord"`, `"slack"`, `"mattermost"`, `"telegram"`, `"googlechat"`, or `"lineworks"` (non-default platforms require their feature) |
 | `sender_name` | | `"openab-cron"` | Attribution shown in prompt context |
 | `timezone` | | `"UTC"` | IANA timezone (e.g. `"America/New_York"`, `"Europe/Berlin"`) |
 | `thread_id` | | — | Post into an existing thread instead of the channel |
@@ -345,6 +345,7 @@ Use `sender_name` to distinguish different scheduled tasks in logs and thread ti
 |----------|-------------|----------------------|
 | `discord` | (always enabled) | `[discord]` section in config.toml |
 | `slack` | `--features slack` | `[slack]` section in config.toml |
+| `mattermost` | `--features mattermost` | `[mattermost]` section in config.toml |
 | `telegram` | `--features telegram` | `[telegram]` section in config.toml **or** `TELEGRAM_BOT_TOKEN` env var |
 | `googlechat` | `--features googlechat` | `[googlechat] enabled = true` in config.toml **or** `GOOGLE_CHAT_ENABLED=true` env var, plus credentials (`sa_key_json`/`sa_key_file`/`access_token` fields or their `GOOGLE_CHAT_*` env equivalents) |
 | `lineworks` | `--features lineworks` | `[lineworks]` section in config.toml (or the `LINEWORKS_*` env equivalents) |

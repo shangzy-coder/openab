@@ -6,7 +6,7 @@ English | [繁體中文](README.zh-TW.md)
 
 ![OpenAB banner](images/banner.jpg)
 
-A lightweight, secure, cloud-native ACP harness that bridges **Discord, Slack**, and any [Agent Client Protocol](https://github.com/anthropics/agent-protocol)-compatible coding CLI (Kiro CLI, Claude Code, Codex, Gemini, OpenCode, MiMo-Code, Kimi Code, Copilot CLI, Hermes, Grok Build, Devin, Antigravity, Pi, etc.) over stdio JSON-RPC — delivering the next-generation development experience. **Telegram, LINE, Feishu/Lark, Google Chat, WeCom, and Microsoft Teams** are available through gateway adapters, either compiled into the unified binary or deployed as the standalone [Custom Gateway](crates/openab-gateway/).
+A lightweight, secure, cloud-native ACP harness that bridges **Discord, Slack, Mattermost**, and any [Agent Client Protocol](https://github.com/anthropics/agent-protocol)-compatible coding CLI (Kiro CLI, Claude Code, Codex, Gemini, OpenCode, MiMo-Code, Kimi Code, Copilot CLI, Hermes, Grok Build, Devin, Antigravity, Pi, etc.) over stdio JSON-RPC — delivering the next-generation development experience. **Telegram, LINE, Feishu/Lark, Google Chat, WeCom, and Microsoft Teams** are available through gateway adapters, either compiled into the unified binary or deployed as the standalone [Custom Gateway](crates/openab-gateway/).
 
 🪼 **Join our community!** Come say hi on Discord — we'd love to have you: **[🪼 OpenAB — Official](https://openab.dev/discord)** 🎉
 
@@ -52,7 +52,7 @@ webhook platforms and `WS/webhook` for Feishu/Lark.
 
 ## Features
 
-- **Multi-platform** — supports Discord and Slack, run one or both simultaneously
+- **Multi-platform** — supports Discord, Slack, and Mattermost; run any combination simultaneously
 - **Gateway adapters** — extend to Telegram, LINE, Feishu/Lark, Google Chat, WeCom, and Microsoft Teams through the standalone [gateway](crates/openab-gateway/) or an opt-in unified build
 - **Pluggable agent backend** — swap between Kiro CLI, Claude Code, Codex, Gemini, OpenCode, MiMo-Code, Kimi Code, Copilot CLI, Hermes, Grok Build, Devin, Antigravity, Pi via config
 - **@mention trigger** — mention the bot in an allowed channel to start a conversation
@@ -99,6 +99,13 @@ See [docs/discord.md](docs/discord.md) for a detailed step-by-step guide.
 <summary><strong>Slack</strong></summary>
 
 See [docs/slack.md](docs/slack.md) for a detailed step-by-step guide.
+
+</details>
+
+<details>
+<summary><strong>Mattermost</strong></summary>
+
+See [docs/mattermost.md](docs/mattermost.md) for bot creation, permissions, and configuration.
 
 </details>
 
@@ -175,6 +182,8 @@ The bot creates a thread. After that, just type in the thread — no @mention ne
 
 **Slack:** `@YourBot explain this code` in a channel — same thread-based workflow as Discord.
 
+**Mattermost:** `@your_bot_username explain this code` in a channel, or message the bot directly. Replies stay in the Mattermost thread (`root_id`).
+
 ## Other Agents
 
 | Agent | CLI | ACP Adapter | Guide |
@@ -235,6 +244,12 @@ app_token = "${SLACK_APP_TOKEN}"     # App-Level Token (xapp-...) for Socket Mod
 allowed_channels = ["C0123456789"]   # channel ID allowlist (empty = allow all)
 # allowed_users = ["U0123456789"]    # user ID allowlist (empty = allow all)
 
+[mattermost]
+server_url = "${MATTERMOST_SERVER_URL}"
+bot_token = "${MATTERMOST_BOT_TOKEN}"
+allowed_channels = ["mattermost-channel-id"]
+# allowed_users = ["mattermost-user-id"]
+
 [agent]
 # command, args, and working_dir default from OPENAB_AGENT_COMMAND and $HOME
 # env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }
@@ -282,6 +297,16 @@ kubectl apply -f k8s/deployment.yaml
 | `k8s/configmap.yaml` | `config.toml` mounted at `/etc/openab/` |
 | `k8s/secret.yaml` | `DISCORD_BOT_TOKEN` injected as env var |
 | `k8s/pvc.yaml` | Persistent storage for auth + settings |
+
+## CubeSandbox Deployment
+
+OpenAB also provides opt-in CubeSandbox image targets for OpenCode, Claude
+Code, and Codex. A Cube MicroVM starts `envd`; the operator then injects
+configuration, authenticates the selected agent, and starts `openab run`
+manually, following the same one-agent-per-runtime model as Kubernetes.
+
+See **[docs/cubesandbox.md](docs/cubesandbox.md)** for image builds, template
+registration, manual startup, and validation.
 
 ## AWS ECS Deployment
 

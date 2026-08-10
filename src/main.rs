@@ -31,6 +31,8 @@ use openab_core::secrets;
 use openab_core::setup;
 #[cfg(feature = "slack")]
 use openab_core::slack;
+#[cfg(feature = "mattermost")]
+use openab_core::mattermost;
 
 use clap::Parser;
 #[cfg(feature = "discord")]
@@ -71,7 +73,7 @@ async fn shutdown_signal() {
 
 #[derive(Parser)]
 #[command(name = "openab", version)]
-#[command(about = "Multi-platform ACP agent broker (Discord, Slack)", long_about = None)]
+#[command(about = "Multi-platform ACP agent broker (Discord, Slack, Mattermost)", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -411,12 +413,14 @@ async fn main() -> anyhow::Result<()> {
         pool_max = cfg.pool.max_sessions,
         discord = cfg.discord.is_some(),
         slack = cfg.slack.is_some(),
+        mattermost = cfg.mattermost.is_some(),
         reactions = cfg.reactions.enabled,
         "config loaded"
     );
 
     if cfg.discord.is_none()
         && cfg.slack.is_none()
+        && cfg.mattermost.is_none()
         && cfg.gateway.is_none()
         && cfg.telegram.is_none()
         && !has_unified_platform(&cfg)
@@ -439,7 +443,14 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("OAB MCP facade exited: {e:#}"));
         }
         anyhow::bail!(
-            "no adapter configured — add [discord], [slack], [telegram], [wecom], [googlechat], or [gateway] to config (or [mcp] for facade-only mode), or set platform env vars (TELEGRAM_BOT_TOKEN, etc.)"
+            "no adapter configured — add [discord], [slack], [mattermost], [telegram], [wecom], [googlechat], or [gateway] to config (or [mcp] for facade-only mode), or set platform env vars (TELEGRAM_BOT_TOKEN, etc.)"
+        );
+    }
+
+    #[cfg(not(feature = "mattermost"))]
+    if cfg.mattermost.is_some() {
+        anyhow::bail!(
+            "[mattermost] is configured, but this openab binary was built without the 'mattermost' feature"
         );
     }
 
@@ -710,6 +721,25 @@ async fn main() -> anyhow::Result<()> {
             );
         }
 
+        // Mattermost: like Slack, keep the richer channel/thread trigger logic
+        // in the adapter while the shared ingress gate authoritatively mirrors
+        // the human identity allowlist.
+        if let Some(m) = &cfg.mattermost {
+            reg.insert(
+                "mattermost",
+                TrustConfig::new(
+                    Some(true),
+                    Vec::<String>::new(),
+                    Some(true),
+                    Some(config::resolve_allow_all(
+                        m.allow_all_users,
+                        &m.allowed_users,
+                    )),
+                    m.allowed_users.clone(),
+                ),
+            );
+        }
+
         // Telegram: L3 (identity) mirrors the resolved
         // [telegram].allow_all_users/allowed_users, so config.toml can
         // restrict who can message the bot without needing
@@ -874,7 +904,7 @@ async fn main() -> anyhow::Result<()> {
         .with_trust(gateway_trust),
     );
 
-    // Shutdown signal for Slack adapter
+    // Shared shutdown signal for background adapters.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let dispatchers: Arc<Mutex<Vec<Arc<dispatch::Dispatcher>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -946,6 +976,19 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "slack"))]
     let shared_slack_adapter: Option<Arc<dyn adapter::ChatAdapter>> = None;
 
+    #[cfg(feature = "mattermost")]
+    let shared_mattermost_adapter: Option<Arc<mattermost::MattermostAdapter>> =
+        if let Some(m) = cfg.mattermost.as_ref() {
+            Some(Arc::new(mattermost::MattermostAdapter::new(
+                m.server_url.clone(),
+                m.bot_token.clone(),
+                session_ttl_dur,
+                m.streaming,
+            )?))
+        } else {
+            None
+        };
+
     // Shared slot for Discord ShardMessenger (set in ready handler, used by ctl for agent.status)
     #[cfg(unix)]
     let ctl_shard: ctl::ShardSlot = Arc::new(std::sync::OnceLock::new());
@@ -963,6 +1006,13 @@ async fn main() -> anyhow::Result<()> {
         }
         if let Some(ref a) = shared_slack_adapter {
             adapters.insert("slack".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
+        }
+        #[cfg(feature = "mattermost")]
+        if let Some(ref a) = shared_mattermost_adapter {
+            adapters.insert(
+                "mattermost".into(),
+                a.clone() as Arc<dyn adapter::ChatAdapter>,
+            );
         }
         if adapters.is_empty() {
             None
@@ -984,6 +1034,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if cfg.slack.is_some() {
         configured_platforms.push("slack");
+    }
+    if cfg.mattermost.is_some() {
+        configured_platforms.push("mattermost");
     }
     #[cfg(feature = "telegram")]
     if cfg.telegram.is_some() || std::env::var("TELEGRAM_BOT_TOKEN").is_ok() {
@@ -1077,6 +1130,85 @@ async fn main() -> anyhow::Result<()> {
     };
     #[cfg(not(feature = "slack"))]
     let slack_handle: Option<tokio::task::JoinHandle<()>> = None;
+
+    // Spawn Mattermost adapter (background task).
+    #[cfg(feature = "mattermost")]
+    let mattermost_handle = if let Some(mattermost_cfg) = cfg.mattermost {
+        let allow_all_channels = config::resolve_allow_all(
+            mattermost_cfg.allow_all_channels,
+            &mattermost_cfg.allowed_channels,
+        );
+        let allow_all_users = config::resolve_allow_all(
+            mattermost_cfg.allow_all_users,
+            &mattermost_cfg.allowed_users,
+        );
+        if !allow_all_channels && mattermost_cfg.allowed_channels.is_empty() {
+            warn!("allow_all_channels=false with empty allowed_channels for Mattermost — bot will deny all channels");
+        }
+        if !allow_all_users && mattermost_cfg.allowed_users.is_empty() {
+            warn!("allow_all_users=false with empty allowed_users for Mattermost — bot will deny all users");
+        }
+        info!(
+            server_url = %mattermost_cfg.server_url,
+            allow_all_channels,
+            allow_all_users,
+            channels = mattermost_cfg.allowed_channels.len(),
+            users = mattermost_cfg.allowed_users.len(),
+            allow_bot_messages = ?mattermost_cfg.allow_bot_messages,
+            allow_user_messages = ?mattermost_cfg.allow_user_messages,
+            streaming = mattermost_cfg.streaming,
+            "starting Mattermost adapter"
+        );
+
+        let (capacity, grouping, idle) = dispatch::dispatch_params(
+            &mattermost_cfg.message_processing_mode,
+            mattermost_cfg.max_buffered_messages,
+        );
+        let mattermost_dispatcher = Arc::new(dispatch::Dispatcher::with_idle_timeout(
+            router.clone(),
+            capacity,
+            mattermost_cfg.max_batch_tokens,
+            grouping,
+            idle,
+        ));
+        dispatchers
+            .lock()
+            .unwrap()
+            .push(mattermost_dispatcher.clone());
+
+        let run_config = mattermost::MattermostRunConfig {
+            allow_all_channels,
+            allow_all_users,
+            allowed_channels: mattermost_cfg.allowed_channels.into_iter().collect(),
+            allowed_users: mattermost_cfg.allowed_users.into_iter().collect(),
+            allow_bot_messages: mattermost_cfg.allow_bot_messages,
+            trusted_bot_ids: mattermost_cfg.trusted_bot_ids.into_iter().collect(),
+            allow_user_messages: mattermost_cfg.allow_user_messages,
+            max_bot_turns: mattermost_cfg.max_bot_turns,
+        };
+        let adapter = shared_mattermost_adapter
+            .clone()
+            .expect("shared_mattermost_adapter must exist when Mattermost config is present");
+        let mattermost_router = router.clone();
+        let mattermost_shutdown_rx = shutdown_rx.clone();
+        Some(tokio::spawn(async move {
+            if let Err(err) = mattermost::run_mattermost_adapter(
+                adapter,
+                mattermost_router,
+                run_config,
+                mattermost_shutdown_rx,
+                mattermost_dispatcher,
+            )
+            .await
+            {
+                error!(error = %err, "Mattermost adapter error");
+            }
+        }))
+    } else {
+        None
+    };
+    #[cfg(not(feature = "mattermost"))]
+    let mattermost_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // Spawn Gateway adapter (background task)
     let gateway_handle = if let Some(gw_cfg) = cfg.gateway {
@@ -1587,6 +1719,13 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref a) = shared_slack_adapter {
             cron_adapters.insert("slack".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
         }
+        #[cfg(feature = "mattermost")]
+        if let Some(ref a) = shared_mattermost_adapter {
+            cron_adapters.insert(
+                "mattermost".into(),
+                a.clone() as Arc<dyn adapter::ChatAdapter>,
+            );
+        }
         #[cfg(feature = "telegram")]
         if let Some(ref a) = shared_unified_adapter {
             cron_adapters.insert("telegram".into(), a.clone());
@@ -1784,6 +1923,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     if let Some(handle) = slack_handle {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+    if let Some(handle) = mattermost_handle {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
     }
     if let Some(handle) = gateway_handle {

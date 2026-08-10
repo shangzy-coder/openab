@@ -1,4 +1,5 @@
-# Enable one or more adapters. At least one [discord] or [slack] section is required.
+# Enable one or more adapters. At least one [discord], [slack], or [mattermost]
+# section is required (unless running in [mcp] facade-only mode).
 
 [discord]
 bot_token = "${DISCORD_BOT_TOKEN}"
@@ -44,6 +45,22 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
 #                                       # regardless of assistant_mode — useful in multi-agent threads
 #                                       # to avoid streamed-edit states re-firing app_mention.
 #                                       # What a send-once message *contains* is controlled by [reactions] narration_display.
+
+# [mattermost]
+# server_url = "${MATTERMOST_SERVER_URL}" # site root, e.g. https://chat.example.com
+# bot_token = "${MATTERMOST_BOT_TOKEN}"   # token from Integrations → Bot Accounts
+# allow_all_channels = true                # omitted = infer from allowed_channels
+# allowed_channels = ["channel-id"]        # Mattermost channel IDs
+# allow_all_users = true                   # omitted = infer from allowed_users
+# allowed_users = ["user-id"]              # Mattermost user IDs
+# allow_bot_messages = "off"               # "off" (default) | "mentions" | "all"
+# trusted_bot_ids = []                     # Mattermost bot user IDs
+# allow_user_messages = "multibot-mentions" # "multibot-mentions" | "involved" | "mentions"
+# max_bot_turns = 100
+# message_processing_mode = "per-message"  # "per-message" | "per-thread" | "per-lane"
+# max_buffered_messages = 10
+# max_batch_tokens = 24000
+# streaming = true                         # post + PUT /posts/{id}/patch
 
 # [gateway]
 # url = "ws://openab-gateway:8080/ws"  # WebSocket URL of the custom gateway

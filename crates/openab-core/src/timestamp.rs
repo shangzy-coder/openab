@@ -44,6 +44,12 @@ pub fn slack_ts_to_iso8601(ts: &str) -> String {
     unix_to_iso8601(secs, ms)
 }
 
+/// Convert a Unix timestamp in milliseconds to ISO 8601 UTC.
+pub fn unix_millis_to_iso8601(timestamp_ms: i64) -> String {
+    let timestamp_ms = timestamp_ms.max(0) as u64;
+    unix_to_iso8601(timestamp_ms / 1000, timestamp_ms % 1000)
+}
+
 /// Current wall-clock instant as ISO 8601 UTC with millisecond precision.
 pub fn now_iso8601() -> String {
     let dur = SystemTime::now()
@@ -99,6 +105,14 @@ mod tests {
     #[test]
     fn slack_ts_unparseable_falls_back_to_epoch() {
         assert_eq!(slack_ts_to_iso8601("not-a-ts"), "1970-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn unix_millis_keeps_milliseconds() {
+        assert_eq!(
+            unix_millis_to_iso8601(1_714_204_397_123),
+            "2024-04-27T07:53:17.123Z"
+        );
     }
 
     #[test]

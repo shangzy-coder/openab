@@ -236,6 +236,7 @@ fn default_filestore_max_file_size_mb() -> u64 {
 pub struct Config {
     pub discord: Option<DiscordConfig>,
     pub slack: Option<SlackConfig>,
+    pub mattermost: Option<MattermostConfig>,
     pub gateway: Option<GatewayConfig>,
     pub telegram: Option<TelegramConfig>,
     pub line: Option<LineConfig>,
@@ -639,6 +640,47 @@ pub struct SlackConfig {
     /// `app_mention`. Mirrors `[gateway] streaming` in concept, but the default
     /// deliberately differs: `GatewayConfig.streaming` defaults to `false`,
     /// whereas this defaults to `true` to preserve current Slack streaming.
+    #[serde(default = "default_true")]
+    pub streaming: bool,
+}
+
+/// Mattermost adapter using the v4 REST API plus the outbound WebSocket API.
+///
+/// The adapter is absent unless a `[mattermost]` section is configured, so
+/// existing deployments keep their current startup and runtime behaviour.
+#[derive(Debug, Deserialize)]
+pub struct MattermostConfig {
+    /// Mattermost site URL, for example `https://chat.example.com`.
+    pub server_url: String,
+    /// Bot access token used for REST and WebSocket authentication.
+    pub bot_token: String,
+    /// Explicit flag: true = allow all channels, false = check `allowed_channels`.
+    /// When omitted, a non-empty list restricts access and an empty list allows all.
+    pub allow_all_channels: Option<bool>,
+    /// Explicit flag: true = allow all users, false = check `allowed_users`.
+    /// When omitted, a non-empty list restricts access and an empty list allows all.
+    pub allow_all_users: Option<bool>,
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    #[serde(default)]
+    pub allow_bot_messages: AllowBots,
+    /// Mattermost bot user IDs allowed through the bot-message gate.
+    /// Empty means any bot is eligible when `allow_bot_messages` permits it.
+    #[serde(default)]
+    pub trusted_bot_ids: Vec<String>,
+    #[serde(default)]
+    pub allow_user_messages: AllowUsers,
+    #[serde(default = "default_max_bot_turns")]
+    pub max_bot_turns: u32,
+    #[serde(default)]
+    pub message_processing_mode: MessageProcessingMode,
+    #[serde(default = "default_max_buffered_messages")]
+    pub max_buffered_messages: usize,
+    #[serde(default = "default_max_batch_tokens")]
+    pub max_batch_tokens: usize,
+    /// Stream replies by creating a placeholder post and patching it in place.
     #[serde(default = "default_true")]
     pub streaming: bool,
 }
@@ -3780,6 +3822,48 @@ command = "echo"
             toml::from_str("bot_token = \"x\"\napp_token = \"y\"\nassistant_mode = false\n")
                 .unwrap();
         assert!(!cfg2.assistant_mode);
+    }
+
+    #[test]
+    fn mattermost_config_defaults_are_backward_safe() {
+        let cfg: MattermostConfig = toml::from_str(
+            "server_url = \"https://chat.example.com\"\nbot_token = \"token\"\n",
+        )
+        .unwrap();
+        assert!(cfg.allow_all_channels.is_none());
+        assert!(cfg.allow_all_users.is_none());
+        assert!(cfg.allowed_channels.is_empty());
+        assert!(cfg.allowed_users.is_empty());
+        assert_eq!(cfg.allow_bot_messages, AllowBots::Off);
+        assert_eq!(cfg.allow_user_messages, AllowUsers::MultibotMentions);
+        assert_eq!(cfg.message_processing_mode, MessageProcessingMode::Message);
+        assert!(cfg.streaming);
+    }
+
+    #[test]
+    fn parse_mattermost_section() {
+        let cfg = parse_config(
+            r#"
+[mattermost]
+server_url = "https://chat.example.com"
+bot_token = "token"
+allowed_channels = ["channel-1"]
+allow_all_users = false
+allowed_users = ["user-1"]
+streaming = false
+
+[agent]
+command = "echo"
+"#,
+            "test",
+        )
+        .unwrap();
+        let mattermost = cfg.mattermost.unwrap();
+        assert_eq!(mattermost.server_url, "https://chat.example.com");
+        assert_eq!(mattermost.allowed_channels, vec!["channel-1"]);
+        assert_eq!(mattermost.allowed_users, vec!["user-1"]);
+        assert!(!mattermost.allow_all_users.unwrap());
+        assert!(!mattermost.streaming);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 OpenAB is configured via a TOML file (default: `config.toml`). Environment variables can be interpolated using `${VAR_NAME}` syntax.
 
-At least one adapter section (`[discord]` or `[slack]`) is required.
+At least one adapter section (`[discord]`, `[slack]`, or `[mattermost]`) is required, unless OpenAB is running in `[mcp]` facade-only mode.
 
 ## Loading Config
 
@@ -108,6 +108,31 @@ Slack adapter using Socket Mode. Requires both a Bot User OAuth Token and an App
 | `max_buffered_messages` | u32 | `10` | Same as Discord. |
 | `max_batch_tokens` | u32 | `24000` | Same as Discord. |
 | `assistant_mode` | bool | `true` | Use `assistant.threads.setStatus` for status indicators instead of emoji reactions, and native content streaming via `chat.startStream`/`appendStream`/`stopStream` instead of the post+edit loop. Native streaming is suppressed when another bot is present in the thread. Requires an AI-app Slack app with `assistant:write` — set to `false` for non-AI Slack apps to keep emoji-reaction status. When native streaming is active, the `reply_to` output directive is bypassed — the streamed message is itself the in-thread reply. |
+
+---
+
+## `[mattermost]`
+
+Mattermost adapter using the v4 REST API for outbound actions and `/api/v4/websocket` for inbound events. See [mattermost.md](mattermost.md) for setup.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `server_url` | string | *required* | Mattermost site root, for example `https://chat.example.com`. A subpath installation is supported. Supplying a URL ending in `/api/v4` is also accepted. |
+| `bot_token` | string | *required* | Mattermost bot access token. Use `${MATTERMOST_BOT_TOKEN}` for env expansion. |
+| `allow_all_channels` | bool \| omit | auto-detect | `true` = all channels; `false` = only `allowed_channels`. Omitted = inferred from the list (non-empty → false, empty → true). |
+| `allowed_channels` | string[] | `[]` | Mattermost channel IDs. Applies to public/private channels and direct/group-message channel IDs. |
+| `allow_all_users` | bool \| omit | auto-detect | `true` = any user; `false` = only `allowed_users`. Omitted = inferred from the list. |
+| `allowed_users` | string[] | `[]` | Mattermost user IDs. Bot-authored posts use the separate bot gate. |
+| `allow_bot_messages` | string | `"off"` | `"off"`, `"mentions"`, or `"all"`. Own bot posts are always ignored. |
+| `trusted_bot_ids` | string[] | `[]` | When non-empty, only these Mattermost bot user IDs pass the bot gate. A trusted bot that explicitly @mentions this bot can pull it into a thread even when the mode is `"off"`. |
+| `allow_user_messages` | string | `"multibot-mentions"` | Same involvement semantics as Discord/Slack. Channel root posts require @mention; DMs are implicit mentions. |
+| `max_bot_turns` | u32 | `100` | Soft cap on consecutive bot turns per Mattermost thread; a human reply resets it. The global hard cap remains 1000. |
+| `message_processing_mode` | string | `"per-message"` | `"per-message"`, `"per-thread"`, or `"per-lane"`. See [Message Dispatch Modes](message-dispatch-modes.md). |
+| `max_buffered_messages` | u32 | `10` | Per-thread/lane dispatcher capacity. |
+| `max_batch_tokens` | u32 | `24000` | Soft token cap per ACP turn in batched modes. |
+| `streaming` | bool | `true` | Create a placeholder post and update it through `PUT /posts/{post_id}/patch`. Automatically suppressed in known multi-bot threads. |
+
+Mattermost thread mapping is deterministic: an incoming reply uses its existing `root_id`; a top-level `@bot` trigger uses that post's `id` as the new root. Attachment ingestion is not included in the first Mattermost adapter version; text in posts containing files is still processed, but attachment-only posts are ignored.
 
 ---
 

@@ -238,7 +238,14 @@ pub fn should_fire(schedule: &Schedule, tz: Tz) -> bool {
 }
 
 /// Known platforms that have adapter support.
-const VALID_PLATFORMS: &[&str] = &["discord", "slack", "telegram", "googlechat", "lineworks"];
+const VALID_PLATFORMS: &[&str] = &[
+    "discord",
+    "slack",
+    "mattermost",
+    "telegram",
+    "googlechat",
+    "lineworks",
+];
 
 /// Cron platforms that must NOT get a synthetic thread: Google Chat cron
 /// messages stay top-level by design, and LINE WORKS has no thread/topic API
@@ -1664,6 +1671,15 @@ message = "a"
         job.disable_on_success_match = None;
 
         assert!(validate_cronjobs(&[job], &["googlechat"]).is_ok());
+    }
+
+    #[test]
+    fn validate_cronjobs_mattermost_passes_when_configured() {
+        let mut job = test_cron_job();
+        job.platform = "mattermost".into();
+        job.disable_on_success = None;
+        job.disable_on_success_match = None;
+        assert!(validate_cronjobs(&[job], &["mattermost"]).is_ok());
     }
 
     #[test]

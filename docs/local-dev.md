@@ -51,6 +51,7 @@ docker push <your-registry>/openab:latest
     ├── config.rs       # TOML config + ${ENV_VAR} expansion
     ├── discord.rs      # DiscordAdapter: serenity EventHandler + ChatAdapter impl
     ├── slack.rs        # SlackAdapter: Socket Mode + ChatAdapter impl
+    ├── mattermost.rs   # MattermostAdapter: REST + WebSocket + ChatAdapter impl
     ├── media.rs        # shared image resize/compress + STT download
     ├── format.rs       # message splitting, thread name shortening
     ├── reactions.rs    # status reaction controller (debounce, stall detection)
