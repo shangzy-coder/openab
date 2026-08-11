@@ -71,6 +71,16 @@ struct PostedEvent {
     sender_name: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MattermostControlCommand {
+    /// Stop the current ACP turn, preserving messages already queued for the
+    /// next turn.
+    Cancel,
+    /// Stop the current ACP turn and drop all messages currently queued for
+    /// this Mattermost thread.
+    CancelAll,
+}
+
 /// Runtime gates copied out of config before the adapter task is spawned.
 #[derive(Clone)]
 pub struct MattermostRunConfig {
@@ -615,6 +625,24 @@ async fn handle_posted_event(
         }
     }
 
+    // Mattermost does not have a native slash-command interaction in this
+    // adapter. Treat the two session-control commands as exact plain-text
+    // commands (optionally prefixed by an @mention) before normal mention and
+    // follow-up routing. This lets a user stop a turn from the same thread
+    // without accidentally sending the command to the ACP agent as a prompt.
+    if let Some(command) = parse_control_command(&post.message, &identity.username) {
+        handle_control_command(
+            command,
+            &post,
+            &adapter,
+            &router,
+            &dispatcher,
+            &logical_thread_id,
+        )
+        .await;
+        return;
+    }
+
     let mentions_bot = mentions_bot(&post.message, &identity.username);
     let other_bot_present = adapter.other_bot_present(&logical_thread_id).await;
     let participated = if is_dm || mentions_bot {
@@ -728,6 +756,57 @@ async fn handle_posted_event(
         .await
     {
         error!(error = %err, "Mattermost dispatcher submit failed");
+    }
+}
+
+async fn handle_control_command(
+    command: MattermostControlCommand,
+    post: &MattermostPost,
+    adapter: &MattermostAdapter,
+    router: &crate::adapter::AdapterRouter,
+    dispatcher: &crate::dispatch::Dispatcher,
+    logical_thread_id: &str,
+) {
+    let session_key = format!("mattermost:{logical_thread_id}");
+    let reply_channel = ChannelRef {
+        platform: "mattermost".into(),
+        channel_id: post.channel_id.clone(),
+        // Keep a control acknowledgement in the existing Mattermost reply
+        // chain. A top-level control post has no root, so its acknowledgement
+        // remains top-level as well.
+        thread_id: non_empty(&post.root_id).map(str::to_string),
+        parent_id: None,
+        origin_event_id: None,
+    };
+
+    let message = match command {
+        MattermostControlCommand::Cancel => {
+            match router.pool().cancel_session(&session_key).await {
+                Ok(()) => "🛑 Cancel signal sent.".to_string(),
+                Err(err) => format!("⚠️ {err}"),
+            }
+        }
+        MattermostControlCommand::CancelAll => {
+            // Remove dispatcher handles before sending the ACP signal. This
+            // makes a concurrent post start a fresh queue rather than landing
+            // on the consumer being torn down.
+            let dropped = dispatcher.cancel_buffered_thread("mattermost", logical_thread_id);
+            let cancel_result = router.pool().cancel_session(&session_key).await;
+            match (cancel_result, dropped) {
+                (Ok(()), 0) => "🛑 Cancel signal sent.".to_string(),
+                (Ok(()), _) => "🛑 Cancel signal sent. Buffered messages cleared.".to_string(),
+                (Err(_), 0) => {
+                    "⚠️ Nothing to cancel — no active session and no buffered messages.".to_string()
+                }
+                (Err(_), _) => {
+                    "🛑 Buffered messages cleared. No active session to cancel.".to_string()
+                }
+            }
+        }
+    };
+
+    if let Err(err) = adapter.send_message(&reply_channel, &message).await {
+        warn!(error = %err, command = ?command, "failed to send Mattermost control-command acknowledgement");
     }
 }
 
@@ -912,6 +991,15 @@ fn strip_bot_mention(message: &str, username: &str) -> String {
     regex.replace_all(message, "$1").trim().to_string()
 }
 
+fn parse_control_command(message: &str, username: &str) -> Option<MattermostControlCommand> {
+    let normalized = strip_bot_mention(message, username);
+    match normalized.trim() {
+        "/cancel" => Some(MattermostControlCommand::Cancel),
+        "/cancel-all" => Some(MattermostControlCommand::CancelAll),
+        _ => None,
+    }
+}
+
 fn build_create_post_body(channel_id: &str, root_id: Option<&str>, content: &str) -> Value {
     let mut body = json!({
         "channel_id": channel_id,
@@ -1070,6 +1158,24 @@ mod tests {
             "run tests"
         );
         assert!(!mentions_bot("@openab-helper run tests", "openab"));
+    }
+
+    #[test]
+    fn parses_control_commands_with_or_without_a_mention() {
+        assert_eq!(
+            parse_control_command("/cancel", "openab"),
+            Some(MattermostControlCommand::Cancel)
+        );
+        assert_eq!(
+            parse_control_command("@openab /cancel", "openab"),
+            Some(MattermostControlCommand::Cancel)
+        );
+        assert_eq!(
+            parse_control_command("@OpenAB /cancel-all", "openab"),
+            Some(MattermostControlCommand::CancelAll)
+        );
+        assert_eq!(parse_control_command("/cancel now", "openab"), None);
+        assert_eq!(parse_control_command("please /cancel", "openab"), None);
     }
 
     #[test]

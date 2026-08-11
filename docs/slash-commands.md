@@ -9,12 +9,13 @@ OpenAB registers Discord slash commands for session control and agent management
 | `/models` | Select the AI model via dropdown menu | Yes |
 | `/agents` | Select the agent mode via dropdown menu | Yes |
 | `/cancel` | Cancel the current in-flight operation | Yes |
+| `/cancel-all` | Cancel the current operation and clear buffered messages | No |
 | `/reset` | Reset the conversation session (clear history, start fresh) | Yes |
 | `/auth` | Authenticate the backend agent via device flow (**DM-only**) | No |
 | `/remind` | Set a one-shot delayed reminder to mention users/roles | No |
 | `/export-thread` | Export thread/DM as `.txt` (default: last 100 messages) | No |
 
-All responses are **ephemeral** — only the user who invoked the command sees the reply.
+Discord command responses are **ephemeral** — only the user who invoked the command sees the reply.
 
 ## Platform Support
 
@@ -22,6 +23,7 @@ All responses are **ephemeral** — only the user who invoked the command sees t
 |----------|-----------|-------|
 | Discord (guild threads) | ✅ | Commands registered per-guild for instant availability |
 | Discord (DMs) | ✅ | Commands registered globally; may take up to 1 hour to appear after first deploy |
+| Mattermost | ✅ | Send `@bot_username /cancel` or `@bot_username /cancel-all` in the same reply thread; no native slash-command registration |
 | Slack | ❌ | Slack blocks third-party slash commands in threads; see [slack.md](slack.md#slash-commands-are-not-supported-on-slack) |
 
 ## How They Work
@@ -53,6 +55,14 @@ If the agent doesn't expose options, the user sees: `⚠️ No model options ava
 ### `/cancel`
 
 Sends a `session/cancel` JSON-RPC notification to the ACP backend. This aborts in-flight LLM requests and tool calls immediately — no need to wait for the current response to finish.
+
+On Mattermost, send `@bot_username /cancel` as a reply in the conversation thread. The leading mention is important: standard Mattermost clients route a message that starts with `/` to their native slash-command API before it becomes a post. The bot posts a normal in-thread acknowledgement rather than an ephemeral interaction response.
+
+### `/cancel-all`
+
+Cancels the in-flight ACP turn and clears messages already buffered for that thread. Use it when you do not want follow-up messages sent while the agent was busy to run after the cancellation.
+
+On Mattermost, send `@bot_username /cancel-all` in the same reply thread.
 
 ### `/reset`
 

@@ -63,6 +63,32 @@ Set the corresponding flag explicitly to `false` with an empty list for deny-all
 
 With `streaming = true`, OpenAB creates a placeholder post and updates it using Mattermost's post patch API. Set `streaming = false` to post only the final response.
 
+### Stop a running operation
+
+Mattermost clients reserve a message that *starts* with `/` for their native
+slash-command API. Since OpenAB does not register a server-side Mattermost
+slash command, start the control post with the bot mention so it is delivered
+to OpenAB as a normal thread reply:
+
+```text
+@bot_username /cancel
+```
+
+`/cancel` sends an ACP `session/cancel` signal to stop the current model/tool
+turn. Messages that arrived while that turn was running remain queued and can
+be processed by the next turn.
+
+```text
+@bot_username /cancel-all
+```
+
+`/cancel-all` stops the current turn and clears all messages currently queued in
+the thread. Send either command as a reply in the same Mattermost thread whose
+operation you want to stop; a command in another thread cannot cancel that
+session. OpenAB also recognizes a raw `/cancel` or `/cancel-all` if a client/API
+actually creates a post for it, but the mention-prefixed form is the reliable
+one in the standard Mattermost web and desktop clients.
+
 ## 5. Required access
 
 The token's bot account must be able to:
