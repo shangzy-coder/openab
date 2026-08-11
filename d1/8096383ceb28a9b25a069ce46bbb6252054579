@@ -1,0 +1,23 @@
+docs/slash-commands.md
+  s_a9b411f01a317b::t_66d18eb173e645 12,18,26,59-66
+docs/mattermost.md
+  s_a9b411f01a317b::t_39dbe0cd96ef8e 66-91
+crates/openab-core/src/mattermost.rs
+  s_a9b411f01a317b::t_ddc6df6cf32994 74-83,628-645,762-812,994-1002,1163-1180
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "d18096383ceb28a9b25a069ce46bbb6252054579",
+  "prompts": {},
+  "sessions": {
+    "s_a9b411f01a317b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fea07-01de-7d91-843c-cf18a0aa595a",
+        "model": "unknown"
+      },
+      "human_author": "shangzy <luxiaofeng_poop@163.com>"
+    }
+  }
+}
