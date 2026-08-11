@@ -1,0 +1,19 @@
+docs/cubesandbox.md
+  s_a9b411f01a317b::t_5335db6e3abaa6 166,170-176,184-187,190-191,202-218,253-254,267-274
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "37cfcaeed4ee640df5a529cb1a870431114502c0",
+  "prompts": {},
+  "sessions": {
+    "s_a9b411f01a317b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fea07-01de-7d91-843c-cf18a0aa595a",
+        "model": "unknown"
+      },
+      "human_author": "shangzy <luxiaofeng_poop@163.com>"
+    }
+  }
+}
