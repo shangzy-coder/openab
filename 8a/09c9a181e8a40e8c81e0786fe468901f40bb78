@@ -1,0 +1,24 @@
+Dockerfile.unified
+  s_74ce03c2d64bc6::t_1fd250f8d4f786 117-119,122-124,129
+  s_74ce03c2d64bc6::t_b07dd068622c87 87-91,93-96
+  s_74ce03c2d64bc6::t_cceaf3de1a53d4 120-121,125-128,130-133
+  s_74ce03c2d64bc6::t_06e11158f2fd17 34-43
+  s_74ce03c2d64bc6::t_c659cd2334a8cc 92
+  s_74ce03c2d64bc6::t_9ce0013fedbc57 112-116
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "8a09c9a181e8a40e8c81e0786fe468901f40bb78",
+  "prompts": {},
+  "sessions": {
+    "s_74ce03c2d64bc6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4aacc578-5d26-425f-9b5e-42415fdecd3c",
+        "model": "deepseek-v4-flash"
+      },
+      "human_author": "shangzy <luxiaofeng_poop@163.com>"
+    }
+  }
+}
