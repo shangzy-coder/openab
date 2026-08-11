@@ -163,9 +163,16 @@ secret injector, not in the image.
 ```bash
 curl -fsS -H "Authorization: Bearer ${CUBE_API_KEY}" \
   -H 'Content-Type: application/json' \
-  -d '{"templateID":"<template-id>","timeout":3600}' \
+  -d '{"templateID":"<template-id>","timeout":-1,"allow_internet_access":true}' \
   "${CUBE_API_URL}/sandboxes"
 ```
+
+`timeout` is the sandbox idle-lifecycle TTL, not a create-request deadline.
+Use `-1` (`NEVER_TIMEOUT`) for a manually supervised, resident bot sandbox;
+using a positive value such as `3600` destroys the sandbox after one hour.
+Omit the field only when the cluster-wide default is intentionally configured
+as no timeout. Verify a resident instance with `GET /sandboxes/<id>` and check
+that `state` is `running` and `endAt` is `null`.
 
 The response contains the sandbox ID and data-plane access information. Use
 CubeProxy at `CUBE_PROXY_NODE_IP:CUBE_PROXY_PORT_HTTP` for the envd command and
@@ -174,11 +181,14 @@ filesystem APIs; no SSH access is required.
 Example:
 
 ```toml
-[discord]
-bot_token = "${DISCORD_BOT_TOKEN}"
-allowed_channels = ["123456789"]
+[mattermost]
+server_url = "${MATTERMOST_SERVER_URL}"
+bot_token = "${MATTERMOST_BOT_TOKEN}"
+streaming = true
 
 [agent]
+command = "opencode"
+args = ["acp"]
 working_dir = "/workspace"
 
 [pool]
@@ -189,8 +199,23 @@ session_ttl_hours = 1
 enabled = true
 ```
 
-The image-provided `OPENAB_AGENT_COMMAND` selects the correct ACP runtime, so an
-explicit `[agent].command` is unnecessary unless intentionally overriding it.
+Set the `[agent]` command explicitly in CubeSandbox configuration. Depending on
+the envd/template version, image-level `OPENAB_AGENT_COMMAND` may not be
+inherited by a process started later through envd. Use these values for the
+initial targets:
+
+| Template | `command` | `args` |
+|---|---|---|
+| OpenCode | `opencode` | `["acp"]` |
+| Claude Code | `claude-agent-acp` | `[]` |
+| Codex | `codex-acp` | `[]` |
+
+### Time zone
+
+The deployment default is `Asia/Shanghai` (CST, `+0800`). Check a new sandbox
+with `date '+%Y-%m-%d %H:%M:%S %Z %z'` before changing anything; do not mutate
+an existing sandbox merely to enforce the default when it already reports
+`Asia/Shanghai`.
 
 ## Authenticate and start manually
 
@@ -225,6 +250,8 @@ nohup openab run -c /workspace/config.toml \
 
 CubeSandbox keeps `envd` as PID 1. Stopping OpenAB does not destroy the sandbox;
 restart it with the same command after updating configuration or authentication.
+With `timeout=-1`, the sandbox itself remains available after OpenAB is stopped;
+only an explicit `DELETE /sandboxes/<id>` (or an operator action) destroys it.
 
 ## Verification
 
@@ -235,6 +262,14 @@ curl -fsS -o /dev/null http://127.0.0.1:49983/health
 openab --version
 git --version
 rg --version
+```
+
+When wildcard DNS is unavailable, use CubeProxy's path form from the operator
+machine:
+
+```bash
+curl -fsS \
+  "${CUBE_PROXY_SCHEME}://${CUBE_PROXY_NODE_IP}:${CUBE_PROXY_PORT_HTTP}/sandbox/<sandbox-id>/49983/health"
 ```
 
 Then verify the selected agent:
