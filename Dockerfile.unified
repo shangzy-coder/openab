@@ -31,6 +31,16 @@ ARG CUBESANDBOX_ENVD_IMAGE=cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandb
 # To get new digest: docker pull rust:1-bookworm && docker inspect rust:1-bookworm --format '{{index .RepoDigests 0}}'
 FROM rust:1-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc AS local_builder
 WORKDIR /build
+# Optional internal cargo mirror (e.g. a Nexus cargo-group sparse index) to avoid
+# slow/blocked crates.io access when building inside a corporate network. Pass
+# via --build-arg CARGO_NEXUS_REGISTRY=sparse+https://<mirror>/; when unset the
+# build keeps using crates.io unchanged.
+ARG CARGO_NEXUS_REGISTRY=
+RUN if [ -n "${CARGO_NEXUS_REGISTRY}" ]; then \
+      mkdir -p "${CARGO_HOME}" && \
+      printf '[source.crates-io]\nreplace-with = "nexus"\n\n[source.nexus]\nregistry = "%s"\n' \
+        "${CARGO_NEXUS_REGISTRY}" > "${CARGO_HOME}/config.toml"; \
+    fi
 COPY Cargo.toml Cargo.lock ./
 COPY crates/openab-core/Cargo.toml crates/openab-core/Cargo.toml
 COPY crates/openab-gateway/Cargo.toml crates/openab-gateway/Cargo.toml
@@ -74,6 +84,16 @@ RUN test -x /usr/bin/envd
 # Stage: base-debian — shared runtime base for debian-based agents
 # =============================================================================
 FROM debian:trixie-slim AS base-debian
+# Optional internal Debian mirrors (same pattern as base-node's APT_MIRROR*).
+ARG APT_MIRROR=
+ARG APT_MIRROR_SECURITY=
+RUN if [ -n "${APT_MIRROR}" ]; then \
+      sed -i "s|^URIs: http://deb.debian.org/debian\$|URIs: ${APT_MIRROR}|" /etc/apt/sources.list.d/debian.sources; \
+      printf 'Acquire::https::Verify-Peer "false";\nAcquire::https::Verify-Host "false";\n' > /etc/apt/apt.conf.d/99nexus-no-verify; \
+    fi; \
+    if [ -n "${APT_MIRROR_SECURITY}" ]; then \
+      sed -i "s|^URIs: http://deb.debian.org/debian-security\$|URIs: ${APT_MIRROR_SECURITY}|" /etc/apt/sources.list.d/debian.sources; \
+    fi
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl procps ripgrep tini git unzip \
     && rm -rf /var/lib/apt/lists/*
@@ -89,6 +109,28 @@ RUN useradd -m -s /bin/bash -u 1000 agent
 # Stage: base-node — shared runtime base for node-based agents
 # =============================================================================
 FROM node:22-trixie-slim AS base-node
+# Optional internal npm mirror (e.g. a Nexus npm-group) to avoid slow/blocked
+# registry.npmjs.org access. Pass via --build-arg NPM_REGISTRY=https://<mirror>/;
+# when unset npm keeps using the default registry. Writes /root/.npmrc, which the
+# child agent targets (which run npm install as root) inherit.
+ARG NPM_REGISTRY=
+RUN if [ -n "${NPM_REGISTRY}" ]; then \
+      npm config set registry "${NPM_REGISTRY}" && npm config set strict-ssl false; \
+    fi
+# Optional internal Debian mirrors (e.g. Nexus apt-proxy-debian / -security) to
+# avoid slow external deb.debian.org access. Each maps to one URIs line in the
+# deb822 sources file. TLS verification is disabled for apt only when a mirror
+# is set (internal CA not trusted by the base image); apt still GPG-verifies
+# the Release file via Signed-By.
+ARG APT_MIRROR=
+ARG APT_MIRROR_SECURITY=
+RUN if [ -n "${APT_MIRROR}" ]; then \
+      sed -i "s|^URIs: http://deb.debian.org/debian\$|URIs: ${APT_MIRROR}|" /etc/apt/sources.list.d/debian.sources; \
+      printf 'Acquire::https::Verify-Peer "false";\nAcquire::https::Verify-Host "false";\n' > /etc/apt/apt.conf.d/99nexus-no-verify; \
+    fi; \
+    if [ -n "${APT_MIRROR_SECURITY}" ]; then \
+      sed -i "s|^URIs: http://deb.debian.org/debian-security\$|URIs: ${APT_MIRROR_SECURITY}|" /etc/apt/sources.list.d/debian.sources; \
+    fi
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl procps ripgrep tini bubblewrap socat unzip git \
     && rm -rf /var/lib/apt/lists/*
