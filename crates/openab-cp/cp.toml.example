@@ -1,0 +1,94 @@
+# openab-cp example configuration
+#
+# Identity table: every runtime authenticates with a per-agent key
+# (Authorization: Bearer <key> on the WebSocket upgrade). The claims below
+# are IMMUTABLE and owned by this file — a runtime's own [control_plane]
+# config is verified against them at registration and rejected on mismatch.
+
+# The CP terminates no TLS itself. The safe default is loopback; to bind a
+# non-loopback address you must front it with a TLS proxy (wss://) or a
+# private network (e.g. tailnet) AND set allow_insecure_bind = true.
+listen = "127.0.0.1:9800"
+# allow_insecure_bind = true
+
+# Runtimes must heartbeat at this interval; missing heartbeats past the lease
+# window deregisters the instance and fails its in-flight delegations.
+heartbeat_interval_secs = 15
+lease_expiry_secs = 45
+
+# Hard cap on delegation deadlines (seconds from now).
+max_deadline_secs = 1800
+
+# Results larger than this are truncated (head kept) with a marker.
+max_result_bytes = 262144
+
+# Transport-level cap on inbound WebSocket messages (enforced pre-parse).
+max_frame_bytes = 1048576
+
+# Delegation prompts larger than this are rejected.
+max_prompt_bytes = 262144
+
+# A connection must send its cp/register first frame within this many seconds
+# of the WebSocket upgrade, or it is closed. Authentication alone is not a
+# bound: without this, an authenticated peer could park idle sockets
+# indefinitely (pings do not extend the deadline).
+register_timeout_secs = 10
+
+# Maximum simultaneous connections per identity, counted from the upgrade —
+# so sockets that have not registered yet count too — and released as soon as
+# a connection ends. Replicas share one identity, so this is also the ceiling
+# on concurrent replicas of one logical agent.
+max_connections_per_identity = 8
+
+# How long a single outbound WebSocket write may block before the peer is
+# treated as disconnected. A bounded queue does not bound the writer: a peer
+# that stops reading (closed TCP receive window, half-open connection) would
+# otherwise park the CP inside one send, pinning that identity's connection
+# slots and its in-flight delegations for as long as the socket survives — and
+# lease expiry cannot recover it, because the connection task is what acts on
+# the CP's close signal. Keep it generous enough for a slow-but-alive peer
+# draining a large result, short enough that a dead one frees its quota.
+write_timeout_secs = 30
+
+# Memory ceiling for ONE connection's outbound queue, in bytes. The queue is
+# also bounded in entries, but entries are not a memory bound: frame sizes are
+# configured independently, so a queue full of maximum-size frames is
+# entry-legal and megabytes-to-gigabytes large. Bytes are reserved before a
+# frame is enqueued and released when it is dequeued or when the connection is
+# torn down; a frame that would exceed the budget is refused exactly like a full
+# queue (the peer is treated as disconnected, never buffered). Must exceed
+# max_frame_bytes so one maximum-size frame always fits.
+max_outbound_queue_bytes = 16777216
+
+# Process-wide ceiling on simultaneously in-flight delegations, enforced at
+# admission (before any capacity is reserved) with SATURATED. Per-target
+# max_delegated_sessions is advertised by the runtime and bounds one target's
+# concurrency; it does not bound the CP's own state, and the in-flight table
+# retains identity and ancestry per live admission.
+max_inflight_delegations = 4096
+
+# Default clamp on a runtime's advertised max_delegated_sessions, applied to
+# every identity that does not set its own max_delegated_sessions_cap below.
+# The advertised value is self-asserted and saturation is the CP's only
+# backpressure signal, so there is no uncapped path: a worker advertising an
+# enormous budget would otherwise disable saturation entirely.
+default_max_delegated_sessions_cap = 16
+
+[[agents]]
+key = "${CP_KEY_KOUDU}"          # per-agent secret, never shared
+namespace = "prod"
+name = "koudu"
+type = "primary"
+
+[[agents]]
+key = "${CP_KEY_WORKER1}"
+namespace = "prod"
+name = "worker-1"
+type = "worker"
+max_delegated_sessions_cap = 4   # overrides default_max_delegated_sessions_cap
+
+# Per-namespace policy. Absent namespaces use the conservative defaults:
+# max_depth = 1, allow_worker_initiation = false.
+[namespaces.prod]
+max_depth = 1
+allow_worker_initiation = false
