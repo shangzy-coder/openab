@@ -91,7 +91,6 @@ ARG APT_MIRROR=
 ARG APT_MIRROR_SECURITY=
 RUN if [ -n "${APT_MIRROR}" ]; then \
       sed -i "s|^URIs: http://deb.debian.org/debian\$|URIs: ${APT_MIRROR}|" /etc/apt/sources.list.d/debian.sources; \
-      printf 'Acquire::https::Verify-Peer "false";\nAcquire::https::Verify-Host "false";\n' > /etc/apt/apt.conf.d/99nexus-no-verify; \
     fi; \
     if [ -n "${APT_MIRROR_SECURITY}" ]; then \
       sed -i "s|^URIs: http://deb.debian.org/debian-security\$|URIs: ${APT_MIRROR_SECURITY}|" /etc/apt/sources.list.d/debian.sources; \
@@ -117,18 +116,16 @@ FROM node:22-trixie-slim AS base-node
 # child agent targets (which run npm install as root) inherit.
 ARG NPM_REGISTRY=
 RUN if [ -n "${NPM_REGISTRY}" ]; then \
-      npm config set registry "${NPM_REGISTRY}" && npm config set strict-ssl false; \
+      npm config set registry "${NPM_REGISTRY}"; \
     fi
 # Optional internal Debian mirrors (e.g. Nexus apt-proxy-debian / -security) to
 # avoid slow external deb.debian.org access. Each maps to one URIs line in the
-# deb822 sources file. TLS verification is disabled for apt only when a mirror
-# is set (internal CA not trusted by the base image); apt still GPG-verifies
-# the Release file via Signed-By.
+# deb822 sources file. HTTPS mirrors must use a certificate trusted by the base
+# image; install an internal CA in a derived builder image when needed.
 ARG APT_MIRROR=
 ARG APT_MIRROR_SECURITY=
 RUN if [ -n "${APT_MIRROR}" ]; then \
       sed -i "s|^URIs: http://deb.debian.org/debian\$|URIs: ${APT_MIRROR}|" /etc/apt/sources.list.d/debian.sources; \
-      printf 'Acquire::https::Verify-Peer "false";\nAcquire::https::Verify-Host "false";\n' > /etc/apt/apt.conf.d/99nexus-no-verify; \
     fi; \
     if [ -n "${APT_MIRROR_SECURITY}" ]; then \
       sed -i "s|^URIs: http://deb.debian.org/debian-security\$|URIs: ${APT_MIRROR_SECURITY}|" /etc/apt/sources.list.d/debian.sources; \
