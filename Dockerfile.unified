@@ -513,14 +513,16 @@ CMD ["openab", "run", "-c", "/etc/openab/config.toml"]
 # Cube templates must boot envd as PID 1 so the control plane can probe
 # :49983/health and use the command/filesystem APIs. Each target inherits the
 # same OpenAB binary, agent runtime, auth command, and HOME layout as its normal
-# container image. The sandbox deliberately does not auto-start OpenAB: inject
-# config/secrets, authenticate the agent, then run `openab run` from a Cube
-# terminal or SDK command, matching the manual Kubernetes workflow.
+# container image. envd and every command it launches run as the inherited
+# unprivileged node user. The sandbox deliberately does not auto-start OpenAB:
+# inject config/secrets, authenticate the agent, then run `openab run` from a
+# Cube terminal or SDK command, matching the manual Kubernetes workflow.
 
 FROM opencode AS cubesandbox-opencode
 USER root
 COPY --from=cubesandbox-envd /usr/bin/envd /usr/bin/envd
 RUN mkdir -p /workspace && chown node:node /workspace
+USER node
 WORKDIR /workspace
 HEALTHCHECK NONE
 EXPOSE 49983
@@ -531,6 +533,7 @@ FROM claude AS cubesandbox-claude
 USER root
 COPY --from=cubesandbox-envd /usr/bin/envd /usr/bin/envd
 RUN mkdir -p /workspace && chown node:node /workspace
+USER node
 WORKDIR /workspace
 HEALTHCHECK NONE
 EXPOSE 49983
@@ -541,6 +544,7 @@ FROM codex AS cubesandbox-codex
 USER root
 COPY --from=cubesandbox-envd /usr/bin/envd /usr/bin/envd
 RUN mkdir -p /workspace && chown node:node /workspace
+USER node
 WORKDIR /workspace
 HEALTHCHECK NONE
 EXPOSE 49983

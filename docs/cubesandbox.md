@@ -33,7 +33,8 @@ CubeSandbox MicroVM
 
 Each OCI image contains only one of the three agents. This keeps credentials,
 configuration, upgrades, and failures isolated in the same way as separate
-Kubernetes Deployments.
+Kubernetes Deployments. The Cube targets run `envd`, OpenAB, and agent commands
+as the inherited unprivileged `node` user (UID 1000), not as root.
 
 ## Prerequisites
 
@@ -88,9 +89,9 @@ checked-out repositories. `POST /templates` returns a build job; poll the
 returned `jobID` until the template status is `READY`.
 
 ```bash
-export CUBE_API_URL="http://192.168.104.116:3000"
-export CUBE_API_KEY="e2b_000000"
-export OPENAB_CUBE_REGISTRY="192.168.111.90:30002/open/openab"
+export CUBE_API_URL="https://cube-api.example.com"
+export CUBE_API_KEY="<cube-api-key>"
+export OPENAB_CUBE_REGISTRY="registry.example.com/openab"
 export OPENAB_CUBE_TAG="<git-commit>"
 
 curl -fsS -H "Authorization: Bearer ${CUBE_API_KEY}" \
@@ -121,9 +122,12 @@ CubeMaster service (the default port is `8089`). The command below is
 equivalent to the REST request above and submits asynchronously:
 
 ```bash
+export CUBEMASTER_ADDRESS="cubemaster.example.com"
+export CUBEMASTER_PORT="8089"
+
 cubemastercli \
-  --address 192.168.104.116 \
-  --port 8089 \
+  --address "${CUBEMASTER_ADDRESS}" \
+  --port "${CUBEMASTER_PORT}" \
   tpl create-from-image \
   --image "${OPENAB_CUBE_REGISTRY}:${OPENAB_CUBE_TAG}-opencode" \
   --writable-layer-size 4G \
@@ -142,11 +146,12 @@ Repeat with `-claude` and `-codex`. For a private registry, add
 `template_id`; monitor and inspect them with:
 
 ```bash
-cubemastercli --address 192.168.104.116 --port 8089 \
+cubemastercli --address "${CUBEMASTER_ADDRESS}" --port "${CUBEMASTER_PORT}" \
   tpl watch --job-id <job-id>
-cubemastercli --address 192.168.104.116 --port 8089 \
+cubemastercli --address "${CUBEMASTER_ADDRESS}" --port "${CUBEMASTER_PORT}" \
   tpl info <template-id> --json --include-request
-cubemastercli --address 192.168.104.116 --port 8089 tpl list -o wide
+cubemastercli --address "${CUBEMASTER_ADDRESS}" --port "${CUBEMASTER_PORT}" \
+  tpl list -o wide
 ```
 
 The important CLI-to-API field mapping is: `--image` → `image`, repeated
@@ -212,10 +217,11 @@ initial targets:
 
 ### Time zone
 
-The deployment default is `Asia/Shanghai` (CST, `+0800`). Check a new sandbox
-with `date '+%Y-%m-%d %H:%M:%S %Z %z'` before changing anything; do not mutate
-an existing sandbox merely to enforce the default when it already reports
-`Asia/Shanghai`.
+OpenAB does not impose a CubeSandbox time zone. A sandbox inherits the template
+and platform configuration. Check a new sandbox with
+`date '+%Y-%m-%d %H:%M:%S %Z %z'`; if the workload requires a fixed zone,
+configure it in the Cube template or a derived image and verify it before
+starting OpenAB.
 
 ## Authenticate and start manually
 

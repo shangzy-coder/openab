@@ -60,6 +60,9 @@ jobs:
           - { name: kimi, agent: "kimi" }
           - { name: mimocode, agent: "mimo" }
           - { name: opencode, agent: "opencode" }
+          - { name: cubesandbox-opencode, agent: "opencode" }
+          - { name: cubesandbox-claude, agent: "claude-agent-acp" }
+          - { name: cubesandbox-codex, agent: "codex-acp" }
           - { name: antigravity, agent: "agy-acp" }
           - { name: pi, agent: "pi-acp" }
           - { name: native, agent: "openab-agent" }
@@ -85,6 +88,25 @@ jobs:
 
       - name: Verify agent CLI exists
         run: docker run --rm --entrypoint which openab-unified-${{ matrix.target.name }}:test ${{ matrix.target.agent }}
+
+      - name: Verify CubeSandbox runtime contract
+        if: startsWith(matrix.target.name, 'cubesandbox-')
+        run: |
+          IMAGE="openab-unified-${{ matrix.target.name }}:test"
+          test "$(docker inspect --format '{{.Config.User}}' "$IMAGE")" = "node"
+          test "$(docker inspect --format '{{json .Config.Entrypoint}}' "$IMAGE")" = '["/usr/bin/envd"]'
+          docker run --rm --entrypoint which "$IMAGE" envd
+
+          CID=$(docker run -d "$IMAGE")
+          trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 15); do
+            if docker exec "$CID" curl -fsS http://127.0.0.1:49983/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$CID"
+          exit 1
 
       - name: Verify Codex runtime versions
         if: matrix.target.name == 'codex'
