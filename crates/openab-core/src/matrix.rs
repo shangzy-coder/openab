@@ -1543,23 +1543,39 @@ fn parse_matrix_file_directives(content: &str) -> (Vec<String>, String) {
     const OPEN: &str = "<openab-send-file>";
     const CLOSE: &str = "</openab-send-file>";
 
-    let mut requested = Vec::new();
-    let mut remaining = content.trim_start();
-    while requested.len() < 5 && remaining.starts_with(OPEN) {
-        let value_start = OPEN.len();
-        let Some(close_offset) = remaining[value_start..].find(CLOSE) else {
-            break;
-        };
-        let close_start = value_start + close_offset;
-        let path = remaining[value_start..close_start].trim();
-        if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control) {
-            break;
+    fn directive_path(line: &str) -> Option<&str> {
+        let trimmed = line.trim();
+        let path = trimmed.strip_prefix(OPEN)?.strip_suffix(CLOSE)?.trim();
+        if path.is_empty()
+            || path.len() > 4096
+            || path.chars().any(char::is_control)
+            || path.contains(['<', '>'])
+        {
+            return None;
         }
-        requested.push(path.to_string());
-        remaining = &remaining[close_start + CLOSE.len()..];
-        remaining = remaining.trim_start_matches(['\r', '\n']);
+        Some(path)
     }
-    (requested, remaining.to_string())
+
+    let mut requested = Vec::new();
+    let mut visible = String::with_capacity(content.len());
+    for segment in content.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if requested.len() < 5 {
+            if let Some(path) = directive_path(line) {
+                requested.push(path.to_string());
+                continue;
+            }
+        }
+        visible.push_str(segment);
+    }
+
+    (
+        requested,
+        visible
+            .trim_matches(|character| matches!(character, '\r' | '\n'))
+            .to_string(),
+    )
 }
 
 fn matrix_outbound_media_type(filename: &str) -> &'static str {
@@ -1597,7 +1613,7 @@ fn matrix_outbound_media_type(filename: &str) -> &'static str {
 
 fn matrix_file_delivery_instruction() -> ContentBlock {
     ContentBlock::Text {
-        text: "<openab_matrix_file_delivery>\nTo send an existing local file back to Matrix, begin your final response with one exact tag per file: <openab-send-file>relative/or/absolute/path</openab-send-file>. Paths must be inside the configured outbound file root. After the tags, write any normal user-facing message. Do not claim that Matrix attachments are unsupported when this capability is present.\n</openab_matrix_file_delivery>".to_string(),
+        text: "<openab_matrix_file_delivery>\nTo send an existing local file back to Matrix, put one exact tag per file on its own line: <openab-send-file>relative/or/absolute/path</openab-send-file>. Tags may appear after tool use or narration, but must not be wrapped in prose or a code fence. Paths must be inside the configured outbound file root. Write any normal user-facing message on separate lines. Do not claim that Matrix attachments are unsupported when this capability is present.\n</openab_matrix_file_delivery>".to_string(),
     }
 }
 
@@ -2097,6 +2113,20 @@ mod tests {
         );
         assert_eq!(files, vec!["poem.txt", "reports/a.pdf"]);
         assert_eq!(body, "Files attached.");
+
+        let (files, body) = parse_matrix_file_directives(
+            "* ✅ `bash`\n\nI created the file.\n<openab-send-file>/workspace/rap.txt</openab-send-file>\nPlease see the attachment.",
+        );
+        assert_eq!(files, vec!["/workspace/rap.txt"]);
+        assert_eq!(
+            body,
+            "* ✅ `bash`\n\nI created the file.\nPlease see the attachment."
+        );
+
+        let inline = "Example: <openab-send-file>poem.txt</openab-send-file>";
+        let (files, body) = parse_matrix_file_directives(inline);
+        assert!(files.is_empty());
+        assert_eq!(body, inline);
 
         let (files, body) = parse_matrix_file_directives("normal response");
         assert!(files.is_empty());

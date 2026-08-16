@@ -83,7 +83,7 @@ Inbound handling follows the same shared `media`, `stt`, and optional `filestore
 
 ### Agent-generated outbound files
 
-Matrix has an adapter-local, opt-in upload path that does not modify the shared `ChatAdapter` contract. Set `outbound_file_root` to a directory such as the agent workspace. OpenAB then tells the agent that it can request delivery with an internal `<openab-send-file>…</openab-send-file>` marker, strips the marker from the visible reply, validates the requested path, uploads the bytes through `/_matrix/media/v3/upload`, and sends `m.file`, `m.image`, `m.audio`, or `m.video` in the current room/thread.
+Matrix has an adapter-local, opt-in upload path that does not modify the shared `ChatAdapter` contract. Set `outbound_file_root` to a directory such as the agent workspace. OpenAB then tells the agent that it can request delivery with an internal `<openab-send-file>…</openab-send-file>` marker on its own line. The marker may follow tool-status output or narration; OpenAB finds and strips valid directive lines anywhere in the visible reply, validates each requested path, uploads the bytes through `/_matrix/media/v3/upload`, and sends `m.file`, `m.image`, `m.audio`, or `m.video` in the current room/thread. Inline examples and malformed tags remain ordinary text.
 
 Paths may be relative to `outbound_file_root` or absolute beneath it. Canonicalization rejects `..` and symlink escapes, only regular files are accepted, at most five files may be requested per reply, and each file is capped at 50 MiB. The feature is disabled when the field is omitted. Enabling it lets any admitted user persuade the agent to send files from that root, so use a dedicated workspace and trusted admission policy outside disposable test environments.
 
