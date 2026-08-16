@@ -461,7 +461,7 @@ impl MatrixAdapter {
         if !run_config.auto_join_invites {
             return;
         }
-        for room_id in sync.rooms.invite.keys() {
+        for (room_id, invite) in &sync.rooms.invite {
             if !run_config.allow_all_rooms && !run_config.allowed_rooms.contains(room_id) {
                 info!(room_id, "ignoring Matrix invite denied by room policy");
                 continue;
@@ -488,6 +488,11 @@ impl MatrixAdapter {
             {
                 Ok(response) if response.room_id == *room_id => {
                     info!(room_id, "joined invited Matrix room");
+                    if let Some(peer) = matrix_direct_inviter(invite) {
+                        if let Err(err) = self.remember_direct_room(peer, room_id).await {
+                            warn!(room_id, peer, error = %err, "joined direct Matrix invite but failed to persist m.direct metadata");
+                        }
+                    }
                 }
                 Ok(response) => {
                     warn!(room_id, joined_room_id = %response.room_id, "Matrix join returned an unexpected room ID");
@@ -497,6 +502,60 @@ impl MatrixAdapter {
                 }
             }
         }
+    }
+
+    async fn remember_direct_room(&self, peer: &str, room_id: &str) -> Result<()> {
+        self.direct_rooms.lock().await.insert(room_id.to_string());
+        let own_user_id = self
+            .user_id
+            .get()
+            .ok_or_else(|| anyhow!("Matrix adapter identity is not initialized"))?;
+        let url = self.endpoint(&["user", own_user_id, "account_data", "m.direct"])?;
+        let response = self
+            .authorized(Method::GET, url.clone())?
+            .send()
+            .await
+            .context("Matrix m.direct read request failed")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("Matrix m.direct read response body failed")?;
+        let mut mapping = if status == reqwest::StatusCode::NOT_FOUND {
+            serde_json::Map::new()
+        } else {
+            anyhow::ensure!(
+                status.is_success(),
+                "Matrix m.direct read failed with HTTP {status}: {}",
+                body.chars().take(MAX_ERROR_BODY_CHARS).collect::<String>()
+            );
+            serde_json::from_str::<Value>(&body)
+                .context("Matrix m.direct read returned invalid JSON")?
+                .as_object()
+                .cloned()
+                .ok_or_else(|| anyhow!("Matrix m.direct account data is not an object"))?
+        };
+        let rooms = mapping
+            .entry(peer.to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if !rooms.is_array() {
+            *rooms = Value::Array(Vec::new());
+        }
+        let rooms = rooms
+            .as_array_mut()
+            .expect("m.direct peer entry was normalized to an array");
+        if !rooms.iter().any(|value| value.as_str() == Some(room_id)) {
+            rooms.push(Value::String(room_id.to_string()));
+        }
+        let _: Value = self
+            .execute_json(
+                self.authorized(Method::PUT, url)?
+                    .json(&Value::Object(mapping)),
+                "Matrix m.direct update",
+            )
+            .await?;
+        info!(room_id, peer, "recorded direct Matrix room");
+        Ok(())
     }
 
     async fn apply_sync_metadata(&self, sync: &MatrixSyncResponse) {
@@ -1566,6 +1625,29 @@ fn matrix_edit_content(content: &str, event_id: &str, thread_root: Option<&str>)
     })
 }
 
+fn matrix_direct_inviter(invite: &Value) -> Option<&str> {
+    invite
+        .get("invite_state")?
+        .get("events")?
+        .as_array()?
+        .iter()
+        .find(|event| {
+            event.get("type").and_then(Value::as_str) == Some("m.room.member")
+                && event
+                    .get("content")
+                    .and_then(|content| content.get("membership"))
+                    .and_then(Value::as_str)
+                    == Some("invite")
+                && event
+                    .get("content")
+                    .and_then(|content| content.get("is_direct"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        })?
+        .get("sender")?
+        .as_str()
+}
+
 fn matrix_event_body(event: &MatrixEvent) -> Option<&str> {
     match event.content.get("msgtype")?.as_str()? {
         "m.text" | "m.notice" | "m.image" | "m.audio" | "m.video" | "m.file" => {
@@ -2466,6 +2548,101 @@ mod tests {
             .insert("!encrypted:example.com".into(), true);
         let encrypted = adapter.send_message(&channel, "hello").await.unwrap_err();
         assert!(encrypted.to_string().contains("E2EE is not supported"));
+    }
+
+    #[test]
+    fn direct_invite_metadata_identifies_the_inviter() {
+        let invite = json!({
+            "invite_state": {
+                "events": [{
+                    "type": "m.room.member",
+                    "sender": "@alice:example.com",
+                    "content": { "membership": "invite", "is_direct": true }
+                }]
+            }
+        });
+        assert_eq!(matrix_direct_inviter(&invite), Some("@alice:example.com"));
+
+        let group_invite = json!({
+            "invite_state": {
+                "events": [{
+                    "type": "m.room.member",
+                    "sender": "@alice:example.com",
+                    "content": { "membership": "invite", "is_direct": false }
+                }]
+            }
+        });
+        assert_eq!(matrix_direct_inviter(&group_invite), None);
+    }
+
+    #[tokio::test]
+    async fn remembering_direct_invite_preserves_and_persists_account_data() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&buffer[..read]);
+                    let Some(header_end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&bytes[..header_end + 4]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if bytes.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8(bytes).unwrap());
+                let body = if index == 0 {
+                    json!({ "@bob:example.com": ["!old:example.com"] }).to_string()
+                } else {
+                    json!({}).to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+
+        let cfg: MatrixConfig = toml::from_str(&format!(
+            "homeserver_url = \"http://{address}\"\naccess_token = \"token\"\n"
+        ))
+        .unwrap();
+        let adapter = MatrixAdapter::new(&cfg, Duration::from_secs(60)).unwrap();
+        adapter.user_id.set("@openab:example.com".into()).unwrap();
+        adapter
+            .remember_direct_room("@alice:example.com", "!dm:example.com")
+            .await
+            .unwrap();
+        assert!(adapter.room_is_direct("!dm:example.com").await);
+
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("GET "));
+        assert!(requests[1].starts_with("PUT "));
+        assert!(requests[1].contains("\"@bob:example.com\":[\"!old:example.com\"]"));
+        assert!(requests[1].contains("\"@alice:example.com\":[\"!dm:example.com\"]"));
     }
 
     #[tokio::test]

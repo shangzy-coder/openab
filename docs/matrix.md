@@ -60,7 +60,7 @@ When `auto_join_invites = true`, OpenAB accepts invitations only when the room I
 
 ## Message and thread behavior
 
-- A top-level room message must mention the OpenAB MXID unless the room is marked as a direct room in the bot account's `m.direct` account data.
+- A top-level room message must mention the OpenAB MXID unless the room is marked as a direct room in the bot account's `m.direct` account data. When `auto_join_invites = true`, an invite carrying the standard `is_direct = true` member hint is recorded into the bot's `m.direct` data after join so DM behavior survives restarts. Clients that omit both signals still require a real Matrix mention.
 - With `thread_replies = true` (the default), top-level triggers receive replies in a Matrix thread using `m.relates_to.rel_type = "m.thread"` with a fallback reply relation.
 - With `thread_replies = false`, top-level triggers receive top-level room replies and use a room-scoped logical session, so subsequent top-level `/model`, `/cancel`, and mentioned prompts reach the same session. Messages received inside an existing Matrix thread still use that thread root and receive in-thread replies.
 - Existing thread messages follow `allow_user_messages`, matching Discord and Slack behavior.
