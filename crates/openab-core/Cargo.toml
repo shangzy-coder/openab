@@ -62,9 +62,10 @@ libc = "0.2"
 tokio = { version = "1", features = ["test-util"] }
 
 [features]
-default = ["discord", "slack", "secrets-aws", "agentcore", "config-s3"]
+default = ["discord", "slack", "matrix", "secrets-aws", "agentcore", "config-s3"]
 discord = ["dep:serenity"]
 slack = []
+matrix = []
 secrets-aws = ["dep:aws-sdk-secretsmanager", "dep:aws-config"]
 config-s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
 pre-seed = ["dep:aws-sdk-s3", "dep:aws-config", "dep:zip", "dep:hex", "dep:flate2", "dep:tar"]

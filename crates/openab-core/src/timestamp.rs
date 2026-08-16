@@ -1,7 +1,7 @@
 //! ISO 8601 UTC timestamp helpers — no external crate dependency.
 //!
-//! Centralizes the Gregorian date math used by Slack (`<unix>.<usec>` ts strings)
-//! and Gateway (`SystemTime::now()`) so both adapters share one implementation.
+//! Centralizes the Gregorian date math used by Slack (`<unix>.<usec>` ts strings),
+//! Matrix (Unix milliseconds), and Gateway (`SystemTime::now()`).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,6 +44,13 @@ pub fn slack_ts_to_iso8601(ts: &str) -> String {
     unix_to_iso8601(secs, ms)
 }
 
+/// Convert Unix milliseconds to ISO 8601 UTC with millisecond precision.
+/// Negative values are treated as the Unix epoch for fail-safe metadata rendering.
+pub fn unix_millis_to_iso8601(millis: i64) -> String {
+    let millis = u64::try_from(millis).unwrap_or(0);
+    unix_to_iso8601(millis / 1_000, millis % 1_000)
+}
+
 /// Current wall-clock instant as ISO 8601 UTC with millisecond precision.
 pub fn now_iso8601() -> String {
     let dur = SystemTime::now()
@@ -55,6 +62,15 @@ pub fn now_iso8601() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unix_millis_keeps_milliseconds() {
+        assert_eq!(
+            unix_millis_to_iso8601(1_714_204_397_123),
+            "2024-04-27T07:53:17.123Z"
+        );
+        assert_eq!(unix_millis_to_iso8601(-1), "1970-01-01T00:00:00.000Z");
+    }
 
     #[test]
     fn slack_ts_epoch_zero() {

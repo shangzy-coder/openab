@@ -6,7 +6,7 @@ English | [繁體中文](README.zh-TW.md)
 
 ![OpenAB banner](images/banner.jpg)
 
-A lightweight, secure, cloud-native ACP harness that bridges **Discord, Slack**, and any [Agent Client Protocol](https://github.com/anthropics/agent-protocol)-compatible coding CLI (Kiro CLI, Claude Code, Codex, Gemini, OpenCode, MiMo-Code, Kimi Code, Copilot CLI, Hermes, Grok Build, Devin, Antigravity, Pi, etc.) over stdio JSON-RPC — delivering the next-generation development experience. **Telegram, LINE, Feishu/Lark, Google Chat, WeCom, and Microsoft Teams** are available through gateway adapters, either compiled into the unified binary or deployed as the standalone [Custom Gateway](crates/openab-gateway/).
+A lightweight, secure, cloud-native ACP harness that bridges **Discord, Slack, Matrix**, and any [Agent Client Protocol](https://github.com/anthropics/agent-protocol)-compatible coding CLI (Kiro CLI, Claude Code, Codex, Gemini, OpenCode, MiMo-Code, Kimi Code, Copilot CLI, Hermes, Grok Build, Devin, Antigravity, Pi, etc.) over stdio JSON-RPC — delivering the next-generation development experience. **Telegram, LINE, Feishu/Lark, Google Chat, WeCom, and Microsoft Teams** are available through gateway adapters, either compiled into the unified binary or deployed as the standalone [Custom Gateway](crates/openab-gateway/).
 
 🪼 **Join our community!** Come say hi on Discord — we'd love to have you: **[🪼 OpenAB — Official](https://openab.dev/discord)** 🎉
 
@@ -52,7 +52,7 @@ webhook platforms and `WS/webhook` for Feishu/Lark.
 
 ## Features
 
-- **Multi-platform** — supports Discord and Slack, run one or both simultaneously
+- **Multi-platform** — supports Discord, Slack, and unencrypted Matrix rooms; run multiple adapters simultaneously
 - **Gateway adapters** — extend to Telegram, LINE, Feishu/Lark, Google Chat, WeCom, and Microsoft Teams through the standalone [gateway](crates/openab-gateway/) or an opt-in unified build
 - **Pluggable agent backend** — swap between Kiro CLI, Claude Code, Codex, Gemini, OpenCode, MiMo-Code, Kimi Code, Copilot CLI, Hermes, Grok Build, Devin, Antigravity, Pi via config
 - **@mention trigger** — mention the bot in an allowed channel to start a conversation
@@ -100,6 +100,13 @@ See [docs/discord.md](docs/discord.md) for a detailed step-by-step guide.
 <summary><strong>Slack</strong></summary>
 
 See [docs/slack.md](docs/slack.md) for a detailed step-by-step guide.
+
+</details>
+
+<details>
+<summary><strong>Matrix</strong></summary>
+
+See [docs/matrix.md](docs/matrix.md) for setup and the unencrypted-room security boundary.
 
 </details>
 
@@ -176,6 +183,8 @@ The bot creates a thread. After that, just type in the thread — no @mention ne
 
 **Slack:** `@YourBot explain this code` in a channel — same thread-based workflow as Discord.
 
+**Matrix:** mention the bot MXID in an allowed unencrypted room; replies use Matrix threads. See [docs/matrix.md](docs/matrix.md).
+
 ## Other Agents
 
 | Agent | CLI | ACP Adapter | Guide |
@@ -235,6 +244,13 @@ bot_token = "${SLACK_BOT_TOKEN}"     # Bot User OAuth Token (xoxb-...)
 app_token = "${SLACK_APP_TOKEN}"     # App-Level Token (xapp-...) for Socket Mode
 allowed_channels = ["C0123456789"]   # channel ID allowlist (empty = allow all)
 # allowed_users = ["U0123456789"]    # user ID allowlist (empty = allow all)
+
+[matrix]
+homeserver_url = "https://matrix.example.com"
+access_token = "${MATRIX_ACCESS_TOKEN}"
+user_id = "@openab:example.com"
+allowed_rooms = ["!engineering:example.com"] # deny all when empty
+allowed_users = ["@alice:example.com"]       # deny all when empty
 
 [agent]
 # command, args, and working_dir default from OPENAB_AGENT_COMMAND and $HOME

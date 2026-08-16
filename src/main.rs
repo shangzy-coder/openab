@@ -31,6 +31,8 @@ use openab_core::secrets;
 use openab_core::setup;
 #[cfg(feature = "slack")]
 use openab_core::slack;
+#[cfg(feature = "matrix")]
+use openab_core::matrix;
 
 use clap::Parser;
 #[cfg(feature = "discord")]
@@ -71,7 +73,7 @@ async fn shutdown_signal() {
 
 #[derive(Parser)]
 #[command(name = "openab", version)]
-#[command(about = "Multi-platform ACP agent broker (Discord, Slack)", long_about = None)]
+#[command(about = "Multi-platform ACP agent broker (Discord, Slack, Matrix)", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -411,12 +413,21 @@ async fn main() -> anyhow::Result<()> {
         pool_max = cfg.pool.max_sessions,
         discord = cfg.discord.is_some(),
         slack = cfg.slack.is_some(),
+        matrix = cfg.matrix.is_some(),
         reactions = cfg.reactions.enabled,
         "config loaded"
     );
 
+    #[cfg(not(feature = "matrix"))]
+    if cfg.matrix.is_some() {
+        anyhow::bail!(
+            "config contains [matrix], but this binary was built without the 'matrix' feature"
+        );
+    }
+
     if cfg.discord.is_none()
         && cfg.slack.is_none()
+        && (cfg.matrix.is_none() || !cfg!(feature = "matrix"))
         && cfg.gateway.is_none()
         && cfg.telegram.is_none()
         && !has_unified_platform(&cfg)
@@ -439,7 +450,7 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("OAB MCP facade exited: {e:#}"));
         }
         anyhow::bail!(
-            "no adapter configured — add [discord], [slack], [telegram], [wecom], [googlechat], or [gateway] to config (or [mcp] for facade-only mode), or set platform env vars (TELEGRAM_BOT_TOKEN, etc.)"
+            "no adapter configured — add [discord], [slack], [matrix], [telegram], [wecom], [googlechat], or [gateway] to config (or [mcp] for facade-only mode), or set platform env vars (TELEGRAM_BOT_TOKEN, etc.)"
         );
     }
 
@@ -710,6 +721,22 @@ async fn main() -> anyhow::Result<()> {
             );
         }
 
+        // Matrix keeps room/direct-room enforcement in the adapter because its
+        // room model is richer than the generic channel gate. The shared gate
+        // mirrors Matrix's explicit, deny-by-default MXID policy at L3.
+        if let Some(m) = &cfg.matrix {
+            reg.insert(
+                "matrix",
+                TrustConfig::new(
+                    Some(true),
+                    Vec::<String>::new(),
+                    Some(true),
+                    Some(m.allow_all_users),
+                    m.allowed_users.clone(),
+                ),
+            );
+        }
+
         // Telegram: L3 (identity) mirrors the resolved
         // [telegram].allow_all_users/allowed_users, so config.toml can
         // restrict who can message the bot without needing
@@ -874,7 +901,7 @@ async fn main() -> anyhow::Result<()> {
         .with_trust(gateway_trust),
     );
 
-    // Shutdown signal for Slack adapter
+    // Shared shutdown signal for background adapters.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let dispatchers: Arc<Mutex<Vec<Arc<dispatch::Dispatcher>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -946,6 +973,17 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "slack"))]
     let shared_slack_adapter: Option<Arc<dyn adapter::ChatAdapter>> = None;
 
+    #[cfg(feature = "matrix")]
+    let shared_matrix_adapter: Option<Arc<matrix::MatrixAdapter>> = match cfg.matrix.as_ref() {
+        Some(matrix_cfg) => Some(Arc::new(matrix::MatrixAdapter::new(
+            matrix_cfg,
+            session_ttl_dur,
+        )?)),
+        None => None,
+    };
+    #[cfg(not(feature = "matrix"))]
+    let shared_matrix_adapter: Option<Arc<dyn adapter::ChatAdapter>> = None;
+
     // Shared slot for Discord ShardMessenger (set in ready handler, used by ctl for agent.status)
     #[cfg(unix)]
     let ctl_shard: ctl::ShardSlot = Arc::new(std::sync::OnceLock::new());
@@ -963,6 +1001,9 @@ async fn main() -> anyhow::Result<()> {
         }
         if let Some(ref a) = shared_slack_adapter {
             adapters.insert("slack".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
+        }
+        if let Some(ref a) = shared_matrix_adapter {
+            adapters.insert("matrix".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
         }
         if adapters.is_empty() {
             None
@@ -984,6 +1025,10 @@ async fn main() -> anyhow::Result<()> {
     }
     if cfg.slack.is_some() {
         configured_platforms.push("slack");
+    }
+    #[cfg(feature = "matrix")]
+    if cfg.matrix.is_some() {
+        configured_platforms.push("matrix");
     }
     #[cfg(feature = "telegram")]
     if cfg.telegram.is_some() || std::env::var("TELEGRAM_BOT_TOKEN").is_ok() {
@@ -1077,6 +1122,67 @@ async fn main() -> anyhow::Result<()> {
     };
     #[cfg(not(feature = "slack"))]
     let slack_handle: Option<tokio::task::JoinHandle<()>> = None;
+
+    // Spawn Matrix adapter (background task).
+    #[cfg(feature = "matrix")]
+    let matrix_handle = if let Some(matrix_cfg) = cfg.matrix {
+        if !matrix_cfg.allow_all_rooms && matrix_cfg.allowed_rooms.is_empty() {
+            warn!("Matrix room policy denies all rooms; set allowed_rooms or allow_all_rooms=true");
+        }
+        if !matrix_cfg.allow_all_users && matrix_cfg.allowed_users.is_empty() {
+            warn!("Matrix user policy denies all users; set allowed_users or allow_all_users=true");
+        }
+        info!(
+            allow_all_rooms = matrix_cfg.allow_all_rooms,
+            allow_all_users = matrix_cfg.allow_all_users,
+            rooms = matrix_cfg.allowed_rooms.len(),
+            users = matrix_cfg.allowed_users.len(),
+            bot_users = matrix_cfg.bot_user_ids.len(),
+            trusted_bots = matrix_cfg.trusted_bot_ids.len(),
+            allow_bot_messages = ?matrix_cfg.allow_bot_messages,
+            allow_user_messages = ?matrix_cfg.allow_user_messages,
+            "starting matrix adapter"
+        );
+        let run_config = matrix::MatrixRunConfig::from_config(&matrix_cfg);
+        let (matrix_cap, matrix_grouping, matrix_idle) = dispatch::dispatch_params(
+            &matrix_cfg.message_processing_mode,
+            matrix_cfg.max_buffered_messages,
+        );
+        let matrix_dispatcher = Arc::new(dispatch::Dispatcher::with_idle_timeout(
+            router.clone(),
+            matrix_cap,
+            matrix_cfg.max_batch_tokens,
+            matrix_grouping,
+            matrix_idle,
+        ));
+        dispatchers.lock().unwrap().push(matrix_dispatcher.clone());
+        let matrix_adapter = shared_matrix_adapter
+            .clone()
+            .expect("shared_matrix_adapter must exist when Matrix config is present");
+        // Matrix auth and the initial full-state sync are startup invariants:
+        // fail the process instead of leaving a Matrix-only deployment idle.
+        let matrix_since = matrix_adapter.initialize(&run_config).await?;
+        let matrix_router = router.clone();
+        let matrix_shutdown_rx = shutdown_rx.clone();
+        Some(tokio::spawn(async move {
+            if let Err(err) = matrix::run_matrix_adapter(
+                matrix_adapter,
+                matrix_router,
+                run_config,
+                matrix_since,
+                matrix_shutdown_rx,
+                matrix_dispatcher,
+            )
+            .await
+            {
+                error!(error = %err, "matrix adapter error");
+            }
+        }))
+    } else {
+        None
+    };
+    #[cfg(not(feature = "matrix"))]
+    let matrix_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // Spawn Gateway adapter (background task)
     let gateway_handle = if let Some(gw_cfg) = cfg.gateway {
@@ -1587,6 +1693,10 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref a) = shared_slack_adapter {
             cron_adapters.insert("slack".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
         }
+        #[cfg(feature = "matrix")]
+        if let Some(ref a) = shared_matrix_adapter {
+            cron_adapters.insert("matrix".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
+        }
         #[cfg(feature = "telegram")]
         if let Some(ref a) = shared_unified_adapter {
             cron_adapters.insert("telegram".into(), a.clone());
@@ -1784,6 +1894,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     if let Some(handle) = slack_handle {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+    if let Some(handle) = matrix_handle {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
     }
     if let Some(handle) = gateway_handle {

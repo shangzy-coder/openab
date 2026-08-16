@@ -12,7 +12,7 @@
 
 Define a platform-agnostic adapter layer for agent-broker so it can serve Discord, Telegram, Slack, and future chat platforms through a single unified architecture. The ACP session pool and agent backend remain unchanged — only the "front door" becomes pluggable.
 
-**Primary contract: simultaneous multi-platform (Contract B).** A single running instance can serve Discord + Slack (+ future adapters) concurrently, sharing one `SessionPool` with platform-namespaced session keys. This was validated by #259 which merged the Slack adapter with Discord + Slack running in one process.
+**Primary contract: simultaneous multi-platform (Contract B).** A single running instance can serve Discord + Slack + Matrix (+ future adapters) concurrently, sharing one `SessionPool` with platform-namespaced session keys. This was validated by #259 which merged the Slack adapter with Discord + Slack running in one process; Matrix follows the same core-adapter contract.
 
 > Contract A (pluggable single-platform per deployment) is a subset of B and works automatically — deploy with only one `[platform]` section in config.
 
@@ -185,16 +185,16 @@ Each adapter only needs to:
 
 ## 6. Platform Comparison
 
-| Feature | Discord | Telegram | Slack |
-|---------|---------|----------|-------|
-| Connection | Gateway WebSocket (`serenity`) | Bot API polling / webhook (`teloxide`) | Socket Mode WebSocket / Events API |
-| Threading model | Thread-as-child-channel | Forum topics (thread-as-reply) | Thread-as-reply-chain (`thread_ts`) |
-| Message limit | 2000 chars | 4096 chars | 4000 chars (blocks: 3000) |
-| Edit support | ✅ Full | ✅ Full | ✅ Full |
-| Reactions | ✅ Unicode + custom emoji | ✅ Unicode emoji | ✅ Unicode + custom emoji (short names) |
-| Trigger | `@mention` | `@mention` or any message (configurable) | `@mention` or app_mention event |
-| Bot message filtering | `msg.author.bot` | `msg.from.is_bot` | `event.bot_id` present |
-| Auth | Bot token | Bot token | Bot token + App token (Socket Mode) |
+| Feature | Discord | Telegram | Slack | Matrix |
+|---------|---------|----------|-------|--------|
+| Connection | Gateway WebSocket (`serenity`) | Bot API polling / webhook (`teloxide`) | Socket Mode WebSocket / Events API | Client-Server `/sync` long polling |
+| Threading model | Thread-as-child-channel | Forum topics (thread-as-reply) | Thread-as-reply-chain (`thread_ts`) | Thread-as-reply-chain (`m.thread`) |
+| Message limit | 2000 chars | 4096 chars | 4000 chars (blocks: 3000) | 8000-char adapter safety bound |
+| Edit support | ✅ Full | ✅ Full | ✅ Full | ✅ `m.replace` (unencrypted rooms) |
+| Reactions | ✅ Unicode + custom emoji | ✅ Unicode emoji | ✅ Unicode + custom emoji (short names) | ✅ `m.reaction` |
+| Trigger | `@mention` | `@mention` or any message (configurable) | `@mention` or app_mention event | structured `m.mentions` or direct room |
+| Bot message filtering | `msg.author.bot` | `msg.from.is_bot` | `event.bot_id` present | explicit configured bot MXIDs |
+| Auth | Bot token | Bot token | Bot token + App token (Socket Mode) | account access token + `whoami` validation |
 
 ---
 
@@ -216,6 +216,12 @@ allowed_users = []                   # empty = deny all (secure by default, per 
 bot_token = "${SLACK_BOT_TOKEN}"
 app_token = "${SLACK_APP_TOKEN}"     # for Socket Mode
 allowed_channels = ["C1234567890"]
+
+[matrix]
+homeserver_url = "https://matrix.example.com"
+access_token = "${MATRIX_ACCESS_TOKEN}"
+allowed_rooms = ["!room:example.com"]
+allowed_users = ["@alice:example.com"]
 
 # Agent and pool config remain unchanged
 [agent]
@@ -250,6 +256,7 @@ pub fn split_message(content: &str, max_len: usize) -> Vec<String>;
 | Discord  | 2000      | 1900 (safety margin) |
 | Telegram | 4096      | 4000 |
 | Slack    | 4000      | 3900 |
+| Matrix   | event-size bound | 8000 |
 
 ---
 
@@ -261,11 +268,12 @@ Config stores Unicode emoji. Each adapter converts internally:
 - Discord: Unicode passthrough
 - Slack: Unicode → short name mapping (e.g. `👀` → `eyes`)
 - Telegram: Unicode passthrough
+- Matrix: Unicode passthrough as the `m.reaction` annotation key
 
-| Action | Discord | Telegram | Slack |
-|--------|---------|----------|-------|
-| Add reaction | `create_reaction()` | `set_message_reaction()` | `reactions.add` |
-| Remove reaction | `delete_reaction()` | `set_message_reaction()` (empty) | `reactions.remove` |
+| Action | Discord | Telegram | Slack | Matrix |
+|--------|---------|----------|-------|--------|
+| Add reaction | `create_reaction()` | `set_message_reaction()` | `reactions.add` | send `m.reaction` |
+| Remove reaction | `delete_reaction()` | `set_message_reaction()` (empty) | `reactions.remove` | redact reaction event |
 
 ---
 
@@ -286,6 +294,7 @@ Config stores Unicode emoji. Each adapter converts internally:
 | **Phase 1** | Extract `ChatAdapter` trait + `AdapterRouter`, refactor Discord to implement trait | ✅ Merged (#259) | Pure refactor + Slack adapter landed together |
 | **Phase 2** | Telegram adapter (`teloxide`), personal + team modes | Not started | Depends on #86 |
 | **Phase 3** | Slack adapter (Socket Mode), channel threading | ✅ Merged (#259) | Includes simultaneous Discord + Slack |
+| **Phase 3b** | Matrix adapter (`/sync`, `m.thread`, unencrypted rooms) | Implemented | E2EE explicitly deferred; room/user policy defaults deny-all |
 | **Phase 4** | Per-adapter session soft limits, streaming timeout | Not started | See Known Limitations |
 | **Phase 5** | Platform-specific features: Slack blocks, Telegram inline keyboards, Discord embeds | Not started | Text-only for v1; extend via `PlatformExt` traits later |
 
@@ -346,7 +355,7 @@ impl ChatAdapter for MockAdapter {
 | # | Question | Decision | Rationale |
 |---|----------|----------|-----------|
 | 1 | Shared vs separate `SessionPool` | **Shared** | Already namespaced by platform prefix; separate pools add complexity with no isolation benefit |
-| 2 | Platform prefix in session keys | **Yes, always prefix** | IDs from different platforms can collide; prefix cost is negligible. Format: `{platform}:{thread_id}` |
+| 2 | Platform prefix in session keys | **Yes, always prefix** | IDs from different platforms can collide; prefix cost is negligible. Format: `{platform}:{thread_id}` (for example `matrix:$thread-root`) |
 | 3 | Global vs per-adapter `max_sessions` | **Global hard cap + per-adapter soft limit** | Prevents one noisy platform from starving others. Global cap in `[pool]`, soft limits in each `[platform]` section |
 | 4 | Rich messages in v1 | **Text-only** | Ship the abstraction first; rich messages are additive and platform-divergent |
 | 5 | Platform-specific features | **Defer to Phase 5** | Keep `ChatAdapter` minimal for v1; extend via `PlatformExt` traits or feature flags later |

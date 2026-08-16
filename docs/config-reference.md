@@ -2,7 +2,7 @@
 
 OpenAB is configured via a TOML file (default: `config.toml`). Environment variables can be interpolated using `${VAR_NAME}` syntax.
 
-At least one adapter section (`[discord]` or `[slack]`) is required.
+At least one adapter section such as `[discord]`, `[slack]`, or `[matrix]` is required.
 
 ## Loading Config
 
@@ -108,6 +108,48 @@ Slack adapter using Socket Mode. Requires both a Bot User OAuth Token and an App
 | `max_buffered_messages` | u32 | `10` | Same as Discord. |
 | `max_batch_tokens` | u32 | `24000` | Same as Discord. |
 | `assistant_mode` | bool | `true` | Use `assistant.threads.setStatus` for status indicators instead of emoji reactions, and native content streaming via `chat.startStream`/`appendStream`/`stopStream` instead of the post+edit loop. Native streaming is suppressed when another bot is present in the thread. Requires an AI-app Slack app with `assistant:write` — set to `false` for non-AI Slack apps to keep emoji-reaction status. When native streaming is active, the `reply_to` output directive is bypassed — the streamed message is itself the in-thread reply. |
+
+---
+
+## `[matrix]`
+
+Matrix Client-Server API adapter. It authenticates with an access token and receives events through `/sync` long polling. The initial sync establishes a fresh cursor, so historical timeline events are not replayed as prompts after startup.
+
+> **Encryption boundary:** the current adapter supports unencrypted rooms only. It detects `m.room.encryption` state and refuses both inbound processing and outbound plaintext in encrypted rooms. E2EE requires a persistent Matrix crypto store and is not silently downgraded.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `homeserver_url` | string | *required* | Homeserver root URL, for example `https://matrix.example.com`. |
+| `access_token` | string | *required* | Matrix access token. Use `${MATRIX_ACCESS_TOKEN}` rather than storing a literal. |
+| `allow_insecure_http` | bool | `false` | Permit bearer authentication over non-loopback HTTP. Use only on a trusted private network; HTTPS and loopback HTTP need no override. |
+| `user_id` | string \| omit | from `/account/whoami` | Optional expected bot MXID. Startup fails when it does not match the token identity. |
+| `allowed_rooms` | string[] | `[]` | Admitted Matrix room IDs (`!room:server`). |
+| `allow_all_rooms` | bool | `false` | Allow every joined unencrypted room. The secure default denies all rooms. |
+| `allowed_users` | string[] | `[]` | Admitted sender MXIDs (`@user:server`). |
+| `allow_all_users` | bool | `false` | Allow every sender. The secure default denies all users. |
+| `bot_user_ids` | string[] | `[]` | MXIDs classified as bots. Matrix has no standard `is_bot` event field, so bot classification must be explicit. `trusted_bot_ids` are implicitly classified as bots too. |
+| `allow_bot_messages` | string | `"off"` | `"off"`, `"mentions"`, or `"all"`, matching the Discord policy. |
+| `trusted_bot_ids` | string[] | `[]` | When non-empty, only these configured bot MXIDs may trigger OpenAB. A trusted explicit mention overrides `allow_bot_messages = "off"`. |
+| `allow_user_messages` | string | `"multibot-mentions"` | Thread follow-up policy, matching Discord and Slack. |
+| `max_bot_turns` | u32 | `100` | Consecutive bot-turn soft limit. |
+| `sync_timeout_seconds` | u64 | `30` | `/sync` long-poll timeout; must be between 1 and 60. |
+| `streaming` | bool | `true` | Stream with a placeholder followed by Matrix `m.replace` edits. Disabled when another configured bot is present. |
+| `message_processing_mode` | string | `"per-message"` | Same as Discord. See [Message Dispatch Modes](message-dispatch-modes.md). |
+| `max_buffered_messages` | u32 | `10` | Same as Discord; must be greater than zero. |
+| `max_batch_tokens` | u32 | `24000` | Same as Discord; must be greater than zero. |
+
+```toml
+[matrix]
+homeserver_url = "https://matrix.example.com"
+access_token = "${MATRIX_ACCESS_TOKEN}"
+user_id = "@openab:example.com"
+allowed_rooms = ["!engineering:example.com"]
+allowed_users = ["@alice:example.com"]
+allow_bot_messages = "off"
+streaming = true
+```
+
+See [Matrix setup](matrix.md) for token, room, thread, and security guidance.
 
 ---
 
@@ -805,9 +847,9 @@ timezone = "UTC"
 |-----|------|---------|-------------|
 | `enabled` | bool | `true` | Set `false` to disable without removing the entry. |
 | `schedule` | string | *required* | Cron expression (minute, hour, day-of-month, month, day-of-week). |
-| `channel` | string | *required* | Target Discord channel/thread ID or Slack channel ID. |
+| `channel` | string | *required* | Target channel/room ID, including canonical Matrix room IDs (`!…:server`). |
 | `message` | string | *required* | Message sent to the agent as a prompt. |
-| `platform` | string | `"discord"` | Target platform (`"discord"` or `"slack"`). |
+| `platform` | string | `"discord"` | Target platform (`"discord"`, `"slack"`, `"matrix"`, `"telegram"`, `"googlechat"`, or `"lineworks"`). |
 | `sender_name` | string | `"openab-cron"` | Sender attribution shown in the prompt context. |
 | `timezone` | string | `"UTC"` | IANA timezone for schedule evaluation (e.g. `"America/New_York"`, `"Europe/Berlin"`). |
 | `thread_id` | string | `""` | Optional thread ID to post into an existing thread. |

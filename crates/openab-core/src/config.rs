@@ -236,6 +236,7 @@ fn default_filestore_max_file_size_mb() -> u64 {
 pub struct Config {
     pub discord: Option<DiscordConfig>,
     pub slack: Option<SlackConfig>,
+    pub matrix: Option<MatrixConfig>,
     pub gateway: Option<GatewayConfig>,
     pub telegram: Option<TelegramConfig>,
     pub line: Option<LineConfig>,
@@ -641,6 +642,58 @@ pub struct SlackConfig {
     /// whereas this defaults to `true` to preserve current Slack streaming.
     #[serde(default = "default_true")]
     pub streaming: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MatrixConfig {
+    /// Matrix homeserver root URL, for example `https://matrix.example.com`.
+    pub homeserver_url: String,
+    /// Bot access token. Prefer `${MATRIX_ACCESS_TOKEN}` rather than a literal.
+    pub access_token: String,
+    /// Permit bearer-token transport over non-loopback HTTP. Default: false.
+    #[serde(default)]
+    pub allow_insecure_http: bool,
+    /// Optional expected MXID. Startup fails if `/account/whoami` returns another user.
+    pub user_id: Option<String>,
+    /// Matrix room IDs admitted by this adapter. Secure default: deny all rooms.
+    #[serde(default)]
+    pub allowed_rooms: Vec<String>,
+    #[serde(default)]
+    pub allow_all_rooms: bool,
+    /// Matrix sender MXIDs admitted by this adapter. Secure default: deny all users.
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    #[serde(default)]
+    pub allow_all_users: bool,
+    /// MXIDs that should be classified as bots. Matrix has no standard `is_bot` flag.
+    #[serde(default)]
+    pub bot_user_ids: Vec<String>,
+    #[serde(default)]
+    pub allow_bot_messages: AllowBots,
+    /// When non-empty, only these configured bot MXIDs may trigger the adapter.
+    /// A trusted bot that explicitly mentions this bot bypasses `allow_bot_messages`.
+    #[serde(default)]
+    pub trusted_bot_ids: Vec<String>,
+    #[serde(default)]
+    pub allow_user_messages: AllowUsers,
+    #[serde(default = "default_max_bot_turns")]
+    pub max_bot_turns: u32,
+    /// Matrix `/sync` long-poll timeout. The HTTP timeout adds a safety margin.
+    #[serde(default = "default_matrix_sync_timeout_seconds")]
+    pub sync_timeout_seconds: u64,
+    /// Stream replies by sending a placeholder and Matrix `m.replace` edits.
+    #[serde(default = "default_true")]
+    pub streaming: bool,
+    #[serde(default)]
+    pub message_processing_mode: MessageProcessingMode,
+    #[serde(default = "default_max_buffered_messages")]
+    pub max_buffered_messages: usize,
+    #[serde(default = "default_max_batch_tokens")]
+    pub max_batch_tokens: usize,
+}
+
+fn default_matrix_sync_timeout_seconds() -> u64 {
+    30
 }
 
 #[derive(Debug, Deserialize)]
@@ -2312,6 +2365,20 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
         );
         anyhow::ensure!(s.max_batch_tokens > 0, "slack.max_batch_tokens must be > 0");
     }
+    if let Some(ref m) = config.matrix {
+        anyhow::ensure!(
+            m.max_buffered_messages > 0,
+            "matrix.max_buffered_messages must be > 0"
+        );
+        anyhow::ensure!(
+            m.max_batch_tokens > 0,
+            "matrix.max_batch_tokens must be > 0"
+        );
+        anyhow::ensure!(
+            (1..=60).contains(&m.sync_timeout_seconds),
+            "matrix.sync_timeout_seconds must be between 1 and 60"
+        );
+    }
     if let Some(ref g) = config.gateway {
         anyhow::ensure!(
             g.max_buffered_messages > 0,
@@ -3780,6 +3847,66 @@ command = "echo"
             toml::from_str("bot_token = \"x\"\napp_token = \"y\"\nassistant_mode = false\n")
                 .unwrap();
         assert!(!cfg2.assistant_mode);
+    }
+
+    #[test]
+    fn matrix_config_defaults_are_secure() {
+        let cfg: MatrixConfig = toml::from_str(
+            "homeserver_url = \"https://matrix.example.com\"\naccess_token = \"token\"\n",
+        )
+        .unwrap();
+        assert!(!cfg.allow_insecure_http);
+        assert!(!cfg.allow_all_rooms);
+        assert!(!cfg.allow_all_users);
+        assert!(cfg.allowed_rooms.is_empty());
+        assert!(cfg.allowed_users.is_empty());
+        assert!(cfg.bot_user_ids.is_empty());
+        assert_eq!(cfg.allow_bot_messages, AllowBots::Off);
+        assert_eq!(cfg.allow_user_messages, AllowUsers::MultibotMentions);
+        assert_eq!(cfg.sync_timeout_seconds, 30);
+        assert!(cfg.streaming);
+    }
+
+    #[test]
+    fn parse_matrix_section_and_reject_invalid_limits() {
+        let cfg = parse_config(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example.com"
+access_token = "token"
+allowed_rooms = ["!room:example.com"]
+allowed_users = ["@alice:example.com"]
+bot_user_ids = ["@bot:example.com"]
+streaming = false
+
+[agent]
+command = "echo"
+"#,
+            "test",
+        )
+        .unwrap();
+        let matrix = cfg.matrix.unwrap();
+        assert_eq!(matrix.allowed_rooms, vec!["!room:example.com"]);
+        assert_eq!(matrix.allowed_users, vec!["@alice:example.com"]);
+        assert_eq!(matrix.bot_user_ids, vec!["@bot:example.com"]);
+        assert!(!matrix.streaming);
+
+        let err = parse_config(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example.com"
+access_token = "token"
+sync_timeout_seconds = 0
+
+[agent]
+command = "echo"
+"#,
+            "test",
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("matrix.sync_timeout_seconds must be between 1 and 60"));
     }
 
     #[test]

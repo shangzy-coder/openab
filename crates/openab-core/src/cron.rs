@@ -238,7 +238,14 @@ pub fn should_fire(schedule: &Schedule, tz: Tz) -> bool {
 }
 
 /// Known platforms that have adapter support.
-const VALID_PLATFORMS: &[&str] = &["discord", "slack", "telegram", "googlechat", "lineworks"];
+const VALID_PLATFORMS: &[&str] = &[
+    "discord",
+    "slack",
+    "matrix",
+    "telegram",
+    "googlechat",
+    "lineworks",
+];
 
 /// Cron platforms that must NOT get a synthetic thread: Google Chat cron
 /// messages stay top-level by design, and LINE WORKS has no thread/topic API
@@ -1667,6 +1674,17 @@ message = "a"
     }
 
     #[test]
+    fn validate_cronjobs_matrix_passes_when_configured() {
+        let mut job = test_cron_job();
+        job.platform = "matrix".into();
+        job.channel = "!engineering:example.com".into();
+        job.disable_on_success = None;
+        job.disable_on_success_match = None;
+
+        assert!(validate_cronjobs(&[job], &["matrix"]).is_ok());
+    }
+
+    #[test]
     fn validate_cronjobs_invalid_cron_fails() {
         let jobs = vec![CronJobConfig {
             id: None,
@@ -1716,7 +1734,7 @@ message = "a"
             schedule: "* * * * *".into(),
             channel: "123".into(),
             message: "hi".into(),
-            platform: "matrix".into(),
+            platform: "whatsapp".into(),
             sender_name: "test".into(),
             thread_id: None,
             timezone: "UTC".into(),

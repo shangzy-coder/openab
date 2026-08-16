@@ -34,3 +34,5 @@ pub mod discord;
 pub mod ambient;
 #[cfg(feature = "slack")]
 pub mod slack;
+#[cfg(feature = "matrix")]
+pub mod matrix;
