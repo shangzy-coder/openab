@@ -7,6 +7,9 @@ on:
 
 jobs:
   check:
+    # This automation depends on the upstream openabdev GitHub App secrets and
+    # organization team. Scheduled workflows inherited by forks must not fail.
+    if: github.repository == 'openabdev/openab'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
