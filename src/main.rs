@@ -1134,6 +1134,7 @@ async fn main() -> anyhow::Result<()> {
         }
         info!(
             allow_all_rooms = matrix_cfg.allow_all_rooms,
+            auto_join_invites = matrix_cfg.auto_join_invites,
             allow_all_users = matrix_cfg.allow_all_users,
             rooms = matrix_cfg.allowed_rooms.len(),
             users = matrix_cfg.allowed_users.len(),
@@ -1141,6 +1142,7 @@ async fn main() -> anyhow::Result<()> {
             trusted_bots = matrix_cfg.trusted_bot_ids.len(),
             allow_bot_messages = ?matrix_cfg.allow_bot_messages,
             allow_user_messages = ?matrix_cfg.allow_user_messages,
+            thread_replies = matrix_cfg.thread_replies,
             "starting matrix adapter"
         );
         let run_config = matrix::MatrixRunConfig::from_config(&matrix_cfg);
@@ -1163,15 +1165,21 @@ async fn main() -> anyhow::Result<()> {
         // fail the process instead of leaving a Matrix-only deployment idle.
         let matrix_since = matrix_adapter.initialize(&run_config).await?;
         let matrix_router = router.clone();
+        let matrix_stt = cfg.stt.clone();
         let matrix_shutdown_rx = shutdown_rx.clone();
+        #[cfg(feature = "filestore")]
+        let matrix_filestore = filestore.clone();
         Some(tokio::spawn(async move {
             if let Err(err) = matrix::run_matrix_adapter(
                 matrix_adapter,
                 matrix_router,
                 run_config,
                 matrix_since,
+                matrix_stt,
                 matrix_shutdown_rx,
                 matrix_dispatcher,
+                #[cfg(feature = "filestore")]
+                matrix_filestore,
             )
             .await
             {

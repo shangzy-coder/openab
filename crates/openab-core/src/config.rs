@@ -660,6 +660,9 @@ pub struct MatrixConfig {
     pub allowed_rooms: Vec<String>,
     #[serde(default)]
     pub allow_all_rooms: bool,
+    /// Automatically join invited rooms admitted by the room policy. Default: false.
+    #[serde(default)]
+    pub auto_join_invites: bool,
     /// Matrix sender MXIDs admitted by this adapter. Secure default: deny all users.
     #[serde(default)]
     pub allowed_users: Vec<String>,
@@ -681,6 +684,12 @@ pub struct MatrixConfig {
     /// Matrix `/sync` long-poll timeout. The HTTP timeout adds a safety margin.
     #[serde(default = "default_matrix_sync_timeout_seconds")]
     pub sync_timeout_seconds: u64,
+    /// Reply to top-level messages in Matrix threads. When false, replies stay top-level.
+    #[serde(default = "default_true")]
+    pub thread_replies: bool,
+    /// Optional directory from which the Matrix adapter may upload agent-requested files.
+    /// Paths are canonicalized and cannot escape this root. Default: disabled.
+    pub outbound_file_root: Option<String>,
     /// Stream replies by sending a placeholder and Matrix `m.replace` edits.
     #[serde(default = "default_true")]
     pub streaming: bool,
@@ -3857,6 +3866,7 @@ command = "echo"
         .unwrap();
         assert!(!cfg.allow_insecure_http);
         assert!(!cfg.allow_all_rooms);
+        assert!(!cfg.auto_join_invites);
         assert!(!cfg.allow_all_users);
         assert!(cfg.allowed_rooms.is_empty());
         assert!(cfg.allowed_users.is_empty());
@@ -3864,6 +3874,8 @@ command = "echo"
         assert_eq!(cfg.allow_bot_messages, AllowBots::Off);
         assert_eq!(cfg.allow_user_messages, AllowUsers::MultibotMentions);
         assert_eq!(cfg.sync_timeout_seconds, 30);
+        assert!(cfg.thread_replies);
+        assert!(cfg.outbound_file_root.is_none());
         assert!(cfg.streaming);
     }
 
@@ -3875,8 +3887,11 @@ command = "echo"
 homeserver_url = "https://matrix.example.com"
 access_token = "token"
 allowed_rooms = ["!room:example.com"]
+auto_join_invites = true
 allowed_users = ["@alice:example.com"]
 bot_user_ids = ["@bot:example.com"]
+thread_replies = false
+outbound_file_root = "/workspace"
 streaming = false
 
 [agent]
@@ -3887,8 +3902,11 @@ command = "echo"
         .unwrap();
         let matrix = cfg.matrix.unwrap();
         assert_eq!(matrix.allowed_rooms, vec!["!room:example.com"]);
+        assert!(matrix.auto_join_invites);
         assert_eq!(matrix.allowed_users, vec!["@alice:example.com"]);
         assert_eq!(matrix.bot_user_ids, vec!["@bot:example.com"]);
+        assert!(!matrix.thread_replies);
+        assert_eq!(matrix.outbound_file_root.as_deref(), Some("/workspace"));
         assert!(!matrix.streaming);
 
         let err = parse_config(

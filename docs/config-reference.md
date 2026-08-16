@@ -125,6 +125,7 @@ Matrix Client-Server API adapter. It authenticates with an access token and rece
 | `user_id` | string \| omit | from `/account/whoami` | Optional expected bot MXID. Startup fails when it does not match the token identity. |
 | `allowed_rooms` | string[] | `[]` | Admitted Matrix room IDs (`!room:server`). |
 | `allow_all_rooms` | bool | `false` | Allow every joined unencrypted room. The secure default denies all rooms. |
+| `auto_join_invites` | bool | `false` | Automatically accept room invitations admitted by `allowed_rooms` / `allow_all_rooms`. Encrypted rooms remain unusable without E2EE support. |
 | `allowed_users` | string[] | `[]` | Admitted sender MXIDs (`@user:server`). |
 | `allow_all_users` | bool | `false` | Allow every sender. The secure default denies all users. |
 | `bot_user_ids` | string[] | `[]` | MXIDs classified as bots. Matrix has no standard `is_bot` event field, so bot classification must be explicit. `trusted_bot_ids` are implicitly classified as bots too. |
@@ -133,6 +134,8 @@ Matrix Client-Server API adapter. It authenticates with an access token and rece
 | `allow_user_messages` | string | `"multibot-mentions"` | Thread follow-up policy, matching Discord and Slack. |
 | `max_bot_turns` | u32 | `100` | Consecutive bot-turn soft limit. |
 | `sync_timeout_seconds` | u64 | `30` | `/sync` long-poll timeout; must be between 1 and 60. |
+| `thread_replies` | bool | `true` | Reply to top-level triggers in an `m.thread`. Set `false` to keep replies top-level; messages received inside an existing thread still receive in-thread replies. |
+| `outbound_file_root` | string \| omit | disabled | Opt in to Matrix-native agent file uploads. Only regular files that canonicalize beneath this directory can be uploaded; maximum 50 MiB. |
 | `streaming` | bool | `true` | Stream with a placeholder followed by Matrix `m.replace` edits. Disabled when another configured bot is present. |
 | `message_processing_mode` | string | `"per-message"` | Same as Discord. See [Message Dispatch Modes](message-dispatch-modes.md). |
 | `max_buffered_messages` | u32 | `10` | Same as Discord; must be greater than zero. |
@@ -144,8 +147,11 @@ homeserver_url = "https://matrix.example.com"
 access_token = "${MATRIX_ACCESS_TOKEN}"
 user_id = "@openab:example.com"
 allowed_rooms = ["!engineering:example.com"]
+# auto_join_invites = false
 allowed_users = ["@alice:example.com"]
 allow_bot_messages = "off"
+thread_replies = true
+# outbound_file_root = "/workspace"
 streaming = true
 ```
 
@@ -665,7 +671,7 @@ Keys can be unicode emoji or Discord/GitHub shortcodes (e.g. `:thumbsup:`). Shor
 
 ## `[stt]`
 
-Speech-to-text transcription for voice messages. Uses an OpenAI-compatible `/audio/transcriptions` endpoint.
+Speech-to-text transcription for Discord, Slack, Matrix, and supported gateway voice/audio messages. Uses an OpenAI-compatible `/audio/transcriptions` endpoint.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -769,14 +775,14 @@ presigned_ttl = 3600       # URL expiry in seconds (default: 3600 = 1 hour)
 
 - Text files ≤ 512 KB: inlined into the prompt as before (unchanged)
 - Text files > 512 KB: downloaded by OAB, uploaded to S3/R2, presigned URL returned
-- PDF, ZIP, binary, and other unsupported formats (Discord/Slack): uploaded to S3/R2, presigned URL returned
+- PDF, ZIP, binary, and other unsupported formats (Discord/Slack/Matrix): uploaded to S3/R2, presigned URL returned
 - The presigned URL requires no authentication — any HTTP GET works
 - File count cap (5 files) still applies
 - Aggregate 1 MB cap only applies to inlined files; filestore uploads bypass it
 
 **Behavior when NOT configured (default):**
 
-- Text files > 512 KB and unsupported formats are silently dropped (existing behavior)
+- Text files > 512 KB and unsupported formats cannot be delivered to the agent. Existing adapters may drop them; Matrix sends an explicit warning.
 
 **Supported backends:**
 

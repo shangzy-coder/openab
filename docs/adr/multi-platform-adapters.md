@@ -192,6 +192,7 @@ Each adapter only needs to:
 | Message limit | 2000 chars | 4096 chars | 4000 chars (blocks: 3000) | 8000-char adapter safety bound |
 | Edit support | ✅ Full | ✅ Full | ✅ Full | ✅ `m.replace` (unencrypted rooms) |
 | Reactions | ✅ Unicode + custom emoji | ✅ Unicode emoji | ✅ Unicode + custom emoji (short names) | ✅ `m.reaction` |
+| Inbound media | ✅ image/audio/text/binary | platform-specific | ✅ image/audio/text/binary | ✅ unencrypted `m.image`/`m.audio`/`m.file`/`m.video` |
 | Trigger | `@mention` | `@mention` or any message (configurable) | `@mention` or app_mention event | structured `m.mentions` or direct room |
 | Bot message filtering | `msg.author.bot` | `msg.from.is_bot` | `event.bot_id` present | explicit configured bot MXIDs |
 | Auth | Bot token | Bot token | Bot token + App token (Socket Mode) | account access token + `whoami` validation |
