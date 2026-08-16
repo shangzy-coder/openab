@@ -2354,6 +2354,16 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
         );
         anyhow::ensure!(s.max_batch_tokens > 0, "slack.max_batch_tokens must be > 0");
     }
+    if let Some(ref m) = config.mattermost {
+        anyhow::ensure!(
+            m.max_buffered_messages > 0,
+            "mattermost.max_buffered_messages must be > 0"
+        );
+        anyhow::ensure!(
+            m.max_batch_tokens > 0,
+            "mattermost.max_batch_tokens must be > 0"
+        );
+    }
     if let Some(ref g) = config.gateway {
         anyhow::ensure!(
             g.max_buffered_messages > 0,
@@ -3864,6 +3874,43 @@ command = "echo"
         assert_eq!(mattermost.allowed_users, vec!["user-1"]);
         assert!(!mattermost.allow_all_users.unwrap());
         assert!(!mattermost.streaming);
+    }
+
+    #[test]
+    fn mattermost_rejects_zero_dispatch_limits() {
+        let zero_buffer = parse_config(
+            r#"
+[mattermost]
+server_url = "https://chat.example.com"
+bot_token = "token"
+max_buffered_messages = 0
+
+[agent]
+command = "echo"
+"#,
+            "test",
+        )
+        .unwrap_err();
+        assert!(zero_buffer
+            .to_string()
+            .contains("mattermost.max_buffered_messages must be > 0"));
+
+        let zero_tokens = parse_config(
+            r#"
+[mattermost]
+server_url = "https://chat.example.com"
+bot_token = "token"
+max_batch_tokens = 0
+
+[agent]
+command = "echo"
+"#,
+            "test",
+        )
+        .unwrap_err();
+        assert!(zero_tokens
+            .to_string()
+            .contains("mattermost.max_batch_tokens must be > 0"));
     }
 
     #[test]

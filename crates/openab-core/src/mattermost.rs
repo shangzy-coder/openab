@@ -27,6 +27,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_INTERVAL: Duration = Duration::from_secs(30);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 const CACHE_MAX_ENTRIES: usize = 1_000;
 
 type MattermostWebSocket =
@@ -409,6 +410,7 @@ pub async fn run_mattermost_adapter(
         info!(url = %adapter.websocket_url, "Mattermost WebSocket connected");
         let (mut write, mut read) = websocket.split();
         let mut ping_interval = tokio::time::interval(PING_INTERVAL);
+        let mut last_inbound = std::time::Instant::now();
         ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Consume the immediate first tick; the connection was just used for auth.
         ping_interval.tick().await;
@@ -423,6 +425,13 @@ pub async fn run_mattermost_adapter(
                     }
                 }
                 _ = ping_interval.tick() => {
+                    if socket_idle(last_inbound.elapsed(), IDLE_TIMEOUT) {
+                        warn!(
+                            idle_secs = last_inbound.elapsed().as_secs(),
+                            "Mattermost WebSocket inbound idle timeout; reconnecting"
+                        );
+                        break;
+                    }
                     match tokio::time::timeout(
                         SEND_TIMEOUT,
                         write.send(tungstenite::Message::Ping(Vec::new())),
@@ -443,6 +452,7 @@ pub async fn run_mattermost_adapter(
                         warn!("Mattermost WebSocket closed; reconnecting");
                         break;
                     };
+                    last_inbound = std::time::Instant::now();
                     match frame {
                         Ok(tungstenite::Message::Text(text)) => {
                             let value: Value = match serde_json::from_str(&text) {
@@ -625,12 +635,37 @@ async fn handle_posted_event(
         }
     }
 
-    // Mattermost does not have a native slash-command interaction in this
-    // adapter. Treat the two session-control commands as exact plain-text
-    // commands (optionally prefixed by an @mention) before normal mention and
-    // follow-up routing. This lets a user stop a turn from the same thread
-    // without accidentally sending the command to the ACP agent as a prompt.
+    let mentions_bot = mentions_bot(&post.message, &identity.username);
+    let other_bot_present = adapter.other_bot_present(&logical_thread_id).await;
+    let participated = if is_dm || mentions_bot {
+        true
+    } else if post.root_id.is_empty() {
+        false
+    } else {
+        adapter.has_participated(&post.root_id).await
+    };
+
+    let should_process = should_process_message(
+        is_bot,
+        is_dm,
+        mentions_bot,
+        !post.root_id.is_empty(),
+        participated,
+        other_bot_present,
+        config.allow_bot_messages,
+        config.allow_user_messages,
+        !config.trusted_bot_ids.is_empty(),
+        config.trusted_bot_ids.contains(&post.user_id),
+    );
+    // Mattermost has no native slash-command interaction in this adapter.
+    // Human control posts preserve the previous allowlist/trust semantics and
+    // do not require a mention. Bot control posts must also pass normal bot
+    // admission; otherwise an untrusted bot could cancel work while bot
+    // messages are disabled.
     if let Some(command) = parse_control_command(&post.message, &identity.username) {
+        if !control_command_admitted(is_bot, should_process) {
+            return;
+        }
         handle_control_command(
             command,
             &post,
@@ -643,42 +678,6 @@ async fn handle_posted_event(
         return;
     }
 
-    let mentions_bot = mentions_bot(&post.message, &identity.username);
-    let other_bot_present = adapter.other_bot_present(&logical_thread_id).await;
-    let participated = if is_dm || mentions_bot {
-        true
-    } else if post.root_id.is_empty() {
-        false
-    } else {
-        adapter.has_participated(&post.root_id).await
-    };
-
-    let should_process = if is_bot {
-        let trusted = config.trusted_bot_ids.contains(&post.user_id);
-        if !config.trusted_bot_ids.is_empty() && !trusted {
-            false
-        } else if trusted && mentions_bot {
-            true
-        } else {
-            match config.allow_bot_messages {
-                AllowBots::Off => false,
-                AllowBots::Mentions => is_dm || mentions_bot,
-                AllowBots::All => {
-                    is_dm || mentions_bot || (!post.root_id.is_empty() && participated)
-                }
-            }
-        }
-    } else if is_dm {
-        true
-    } else if post.root_id.is_empty() {
-        mentions_bot
-    } else {
-        match config.allow_user_messages {
-            AllowUsers::Mentions => mentions_bot,
-            AllowUsers::Involved => mentions_bot || participated,
-            AllowUsers::MultibotMentions => mentions_bot || (participated && !other_bot_present),
-        }
-    };
     if !should_process {
         return;
     }
@@ -962,6 +961,54 @@ fn logical_thread_id(post: &MattermostPost) -> &str {
     non_empty(&post.root_id).unwrap_or(&post.id)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn should_process_message(
+    is_bot: bool,
+    is_dm: bool,
+    mentions_bot: bool,
+    in_thread: bool,
+    participated: bool,
+    other_bot_present: bool,
+    allow_bot_messages: AllowBots,
+    allow_user_messages: AllowUsers,
+    trusted_bot_ids_configured: bool,
+    is_trusted_bot: bool,
+) -> bool {
+    if is_bot {
+        if trusted_bot_ids_configured && !is_trusted_bot {
+            return false;
+        }
+        if is_trusted_bot && mentions_bot {
+            return true;
+        }
+        return match allow_bot_messages {
+            AllowBots::Off => false,
+            AllowBots::Mentions => is_dm || mentions_bot,
+            AllowBots::All => is_dm || mentions_bot || (in_thread && participated),
+        };
+    }
+
+    if is_dm {
+        return true;
+    }
+    if !in_thread {
+        return mentions_bot;
+    }
+    match allow_user_messages {
+        AllowUsers::Mentions => mentions_bot,
+        AllowUsers::Involved => mentions_bot || participated,
+        AllowUsers::MultibotMentions => mentions_bot || (participated && !other_bot_present),
+    }
+}
+
+fn control_command_admitted(is_bot: bool, message_admitted: bool) -> bool {
+    !is_bot || message_admitted
+}
+
+fn socket_idle(since_last_inbound: Duration, timeout: Duration) -> bool {
+    since_last_inbound >= timeout
+}
+
 fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
@@ -1176,6 +1223,54 @@ mod tests {
         );
         assert_eq!(parse_control_command("/cancel now", "openab"), None);
         assert_eq!(parse_control_command("please /cancel", "openab"), None);
+    }
+
+    #[test]
+    fn untrusted_bot_cannot_reach_control_or_prompt_path() {
+        let admitted = should_process_message(
+            true,
+            false,
+            true,
+            true,
+            true,
+            false,
+            AllowBots::Off,
+            AllowUsers::MultibotMentions,
+            true,
+            false,
+        );
+        assert!(!admitted);
+        assert!(!control_command_admitted(true, admitted));
+    }
+
+    #[test]
+    fn human_control_command_preserves_no_mention_behavior() {
+        assert!(control_command_admitted(false, false));
+    }
+
+    #[test]
+    fn trusted_bot_mention_keeps_admission_override() {
+        assert!(should_process_message(
+            true,
+            false,
+            true,
+            true,
+            false,
+            true,
+            AllowBots::Off,
+            AllowUsers::MultibotMentions,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn websocket_idle_timeout_has_exact_boundary() {
+        assert!(!socket_idle(
+            IDLE_TIMEOUT - Duration::from_secs(1),
+            IDLE_TIMEOUT
+        ));
+        assert!(socket_idle(IDLE_TIMEOUT, IDLE_TIMEOUT));
     }
 
     #[test]
