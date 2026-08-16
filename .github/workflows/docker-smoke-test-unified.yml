@@ -86,6 +86,21 @@ jobs:
       - name: Verify agent CLI exists
         run: docker run --rm --entrypoint which openab-unified-${{ matrix.target.name }}:test ${{ matrix.target.agent }}
 
+      - name: Verify Pi runtime contract
+        if: matrix.target.name == 'pi'
+        run: |
+          PI_ACP_VERSION=$(awk -F= '$1 == "ARG PI_ACP_VERSION" {print $2; exit}' Dockerfile.unified)
+          PI_CODING_AGENT_VERSION=$(awk -F= '$1 == "ARG PI_CODING_AGENT_VERSION" {print $2; exit}' Dockerfile.unified)
+          test -n "$PI_ACP_VERSION" && test -n "$PI_CODING_AGENT_VERSION"
+          docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' openab-unified-pi:test \
+            | grep -Fx 'OPENAB_AGENT_COMMAND=pi-acp'
+          docker run --rm --entrypoint node openab-unified-pi:test \
+            -e 'console.log(require("/usr/local/lib/node_modules/pi-acp/package.json").version)' \
+            | grep -Fx "$PI_ACP_VERSION"
+          docker run --rm --entrypoint node openab-unified-pi:test \
+            -e 'console.log(require("/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/package.json").version)' \
+            | grep -Fx "$PI_CODING_AGENT_VERSION"
+
       - name: Verify Codex runtime versions
         if: matrix.target.name == 'codex'
         run: |
