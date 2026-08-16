@@ -27,6 +27,17 @@ ARG BUILDER_IMAGE=local_builder
 # To get new digest: docker pull rust:1-bookworm && docker inspect rust:1-bookworm --format '{{index .RepoDigests 0}}'
 FROM rust:1-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc AS local_builder
 WORKDIR /build
+# Optional sparse Cargo registry mirror. The default remains crates.io.
+ARG CARGO_NEXUS_REGISTRY=
+ARG CARGO_HTTP_TIMEOUT=30
+ARG CARGO_NET_RETRY=3
+ENV CARGO_HTTP_TIMEOUT=${CARGO_HTTP_TIMEOUT} \
+    CARGO_NET_RETRY=${CARGO_NET_RETRY}
+RUN if [ -n "${CARGO_NEXUS_REGISTRY}" ]; then \
+      mkdir -p "${CARGO_HOME}" && \
+      printf '[source.crates-io]\nreplace-with = "nexus"\n\n[source.nexus]\nregistry = "%s"\n' \
+        "${CARGO_NEXUS_REGISTRY}" > "${CARGO_HOME}/config.toml"; \
+    fi
 COPY Cargo.toml Cargo.lock ./
 COPY crates/openab-core/Cargo.toml crates/openab-core/Cargo.toml
 COPY crates/openab-gateway/Cargo.toml crates/openab-gateway/Cargo.toml
@@ -67,12 +78,23 @@ RUN for bin in /build/target/release/openab \
 # Stage: base-debian — shared runtime base for debian-based agents
 # =============================================================================
 FROM debian:trixie-slim AS base-debian
+# Optional Debian mirrors. HTTPS mirrors must use a certificate trusted by the
+# base image; verification is never disabled implicitly.
+ARG APT_MIRROR=
+ARG APT_MIRROR_SECURITY=
+RUN if [ -n "${APT_MIRROR}" ]; then \
+      sed -i "s|^URIs: http://deb.debian.org/debian\$|URIs: ${APT_MIRROR}|" /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    if [ -n "${APT_MIRROR_SECURITY}" ]; then \
+      sed -i "s|^URIs: http://deb.debian.org/debian-security\$|URIs: ${APT_MIRROR_SECURITY}|" /etc/apt/sources.list.d/debian.sources; \
+    fi
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl procps ripgrep tini git unzip \
     && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+ARG GH_CLI_MIRROR=https://cli.github.com/packages
+RUN curl -fsSL "${GH_CLI_MIRROR}/githubcli-archive-keyring.gpg" \
       -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] ${GH_CLI_MIRROR} stable main" \
       > /etc/apt/sources.list.d/github-cli.list && \
     apt-get update && apt-get install -y --no-install-recommends gh && \
     rm -rf /var/lib/apt/lists/*
@@ -82,12 +104,26 @@ RUN useradd -m -s /bin/bash -u 1000 agent
 # Stage: base-node — shared runtime base for node-based agents
 # =============================================================================
 FROM node:22-trixie-slim AS base-node
+# Optional npm and Debian mirrors. Defaults remain the official upstreams.
+ARG NPM_REGISTRY=
+RUN if [ -n "${NPM_REGISTRY}" ]; then \
+      npm config set registry "${NPM_REGISTRY}"; \
+    fi
+ARG APT_MIRROR=
+ARG APT_MIRROR_SECURITY=
+RUN if [ -n "${APT_MIRROR}" ]; then \
+      sed -i "s|^URIs: http://deb.debian.org/debian\$|URIs: ${APT_MIRROR}|" /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    if [ -n "${APT_MIRROR_SECURITY}" ]; then \
+      sed -i "s|^URIs: http://deb.debian.org/debian-security\$|URIs: ${APT_MIRROR_SECURITY}|" /etc/apt/sources.list.d/debian.sources; \
+    fi
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl procps ripgrep tini bubblewrap socat unzip git \
     && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+ARG GH_CLI_MIRROR=https://cli.github.com/packages
+RUN curl -fsSL "${GH_CLI_MIRROR}/githubcli-archive-keyring.gpg" \
       -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] ${GH_CLI_MIRROR} stable main" \
       > /etc/apt/sources.list.d/github-cli.list && \
     apt-get update && apt-get install -y --no-install-recommends gh && \
     rm -rf /var/lib/apt/lists/*
