@@ -162,6 +162,8 @@ Matrix Client-Server API adapter. It authenticates with an access token and rece
 | `thread_replies` | bool | `true` | Reply to top-level triggers in an `m.thread`. Set `false` to keep replies top-level; messages received inside an existing thread still receive in-thread replies. |
 | `outbound_file_root` | string \| omit | disabled | Opt in to Matrix-native agent file uploads. Only regular files that canonicalize beneath this directory can be uploaded; maximum 50 MiB. |
 | `streaming` | bool | `true` | Stream with a placeholder followed by Matrix `m.replace` edits. Disabled when another configured bot is present. |
+| `inbound_media_coalesce_ms` | u64 | `0` | Opt-in wait window for reconstructing media-first input bursts. A media event starts the window, subsequent media reset it, the first following text event flushes immediately, and pure media flushes on timeout. `0` preserves immediate per-event dispatch; maximum `60000`. |
+| `inbound_media_coalesce_max_events` | u32 | `10` | Maximum media/text events in one reconstructed input; `1`–`100`. Reaching the cap flushes immediately. |
 | `message_processing_mode` | string | `"per-message"` | Same as Discord. See [Message Dispatch Modes](message-dispatch-modes.md). |
 | `max_buffered_messages` | u32 | `10` | Same as Discord; must be greater than zero. |
 | `max_batch_tokens` | u32 | `24000` | Same as Discord; must be greater than zero. |
@@ -178,6 +180,8 @@ allow_bot_messages = "off"
 thread_replies = true
 # outbound_file_root = "/workspace"
 streaming = true
+# inbound_media_coalesce_ms = 2000
+# inbound_media_coalesce_max_events = 10
 ```
 
 See [Matrix setup](matrix.md) for token, room, thread, and security guidance.

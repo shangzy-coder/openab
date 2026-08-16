@@ -1268,6 +1268,8 @@ async fn main() -> anyhow::Result<()> {
             allow_bot_messages = ?matrix_cfg.allow_bot_messages,
             allow_user_messages = ?matrix_cfg.allow_user_messages,
             thread_replies = matrix_cfg.thread_replies,
+            inbound_media_coalesce_ms = matrix_cfg.inbound_media_coalesce_ms,
+            inbound_media_coalesce_max_events = matrix_cfg.inbound_media_coalesce_max_events,
             "starting matrix adapter"
         );
         let run_config = matrix::MatrixRunConfig::from_config(&matrix_cfg);

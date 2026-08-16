@@ -29,6 +29,7 @@ const CACHE_MAX_ENTRIES: usize = 1_000;
 const SEEN_EVENT_LIMIT: usize = 10_000;
 const MAX_ERROR_BODY_CHARS: usize = 1_000;
 const MATRIX_OUTBOUND_FILE_LIMIT: u64 = 50 * 1024 * 1024;
+const MAX_MATRIX_INBOUND_COMPOSER_LANES: usize = 1_000;
 
 #[derive(Clone)]
 pub struct MatrixRunConfig {
@@ -43,6 +44,8 @@ pub struct MatrixRunConfig {
     pub allow_user_messages: AllowUsers,
     pub max_bot_turns: u32,
     pub thread_replies: bool,
+    pub inbound_media_coalesce_ms: u64,
+    pub inbound_media_coalesce_max_events: usize,
 }
 
 impl MatrixRunConfig {
@@ -59,6 +62,8 @@ impl MatrixRunConfig {
             allow_user_messages: config.allow_user_messages,
             max_bot_turns: config.max_bot_turns,
             thread_replies: config.thread_replies,
+            inbound_media_coalesce_ms: config.inbound_media_coalesce_ms,
+            inbound_media_coalesce_max_events: config.inbound_media_coalesce_max_events,
         }
     }
 
@@ -146,6 +151,211 @@ struct MatrixEvent {
     origin_server_ts: i64,
     #[serde(default)]
     content: Value,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct MatrixInboundLaneKey {
+    room_id: String,
+    sender_id: String,
+    thread_root: Option<String>,
+}
+
+#[derive(Debug)]
+struct MatrixInboundBatch {
+    room_id: String,
+    events: Vec<MatrixEvent>,
+}
+
+#[derive(Debug)]
+struct PendingMatrixInboundBatch {
+    batch: MatrixInboundBatch,
+    deadline: tokio::time::Instant,
+    sequence: u64,
+}
+
+#[derive(Debug)]
+enum MatrixInboundComposeResult {
+    Buffered,
+    Ready(MatrixInboundBatch),
+    Immediate {
+        batch: MatrixInboundBatch,
+        dropped_pending_events: usize,
+    },
+}
+
+struct MatrixInboundComposer {
+    wait: Duration,
+    max_events: usize,
+    next_sequence: u64,
+    pending: HashMap<MatrixInboundLaneKey, PendingMatrixInboundBatch>,
+}
+
+impl MatrixInboundComposer {
+    fn new(wait_ms: u64, max_events: usize) -> Self {
+        Self {
+            wait: Duration::from_millis(wait_ms),
+            max_events: max_events.max(1),
+            next_sequence: 0,
+            pending: HashMap::new(),
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        !self.wait.is_zero()
+    }
+
+    fn lane_key(room_id: &str, event: &MatrixEvent) -> MatrixInboundLaneKey {
+        MatrixInboundLaneKey {
+            room_id: room_id.to_string(),
+            sender_id: event.sender.clone(),
+            thread_root: event_thread_root(event).map(str::to_string),
+        }
+    }
+
+    fn matching_key(&self, room_id: &str, event: &MatrixEvent) -> Option<MatrixInboundLaneKey> {
+        let direct = Self::lane_key(room_id, event);
+        if self.pending.contains_key(&direct) {
+            return Some(direct);
+        }
+
+        let thread_root = event_thread_root(event)?;
+        let top_level = MatrixInboundLaneKey {
+            room_id: room_id.to_string(),
+            sender_id: event.sender.clone(),
+            thread_root: None,
+        };
+        self.pending.get(&top_level).and_then(|pending| {
+            pending
+                .batch
+                .events
+                .first()
+                .is_some_and(|first| first.event_id == thread_root)
+                .then_some(top_level)
+        })
+    }
+
+    fn immediate(
+        room_id: &str,
+        event: MatrixEvent,
+        dropped_pending_events: usize,
+    ) -> MatrixInboundComposeResult {
+        MatrixInboundComposeResult::Immediate {
+            batch: MatrixInboundBatch {
+                room_id: room_id.to_string(),
+                events: vec![event],
+            },
+            dropped_pending_events,
+        }
+    }
+
+    fn ingest(
+        &mut self,
+        room_id: &str,
+        event: MatrixEvent,
+        own_user_id: &str,
+        now: tokio::time::Instant,
+    ) -> MatrixInboundComposeResult {
+        if !self.enabled()
+            || event.event_type != "m.room.message"
+            || event.event_id.is_empty()
+            || event.sender.is_empty()
+            || is_replacement_event(&event)
+        {
+            return Self::immediate(room_id, event, 0);
+        }
+
+        if matrix_text_body(&event).is_some_and(|body| {
+            strip_user_mention(body, own_user_id)
+                .trim_start()
+                .starts_with('/')
+        }) {
+            let dropped_pending_events = self
+                .matching_key(room_id, &event)
+                .and_then(|key| self.pending.remove(&key))
+                .map_or(0, |pending| pending.batch.events.len());
+            return Self::immediate(room_id, event, dropped_pending_events);
+        }
+
+        if is_matrix_media_event(&event) {
+            let key = self
+                .matching_key(room_id, &event)
+                .unwrap_or_else(|| Self::lane_key(room_id, &event));
+            if let Some(pending) = self.pending.get_mut(&key) {
+                pending.batch.events.push(event);
+                pending.deadline = now + self.wait;
+                if pending.batch.events.len() >= self.max_events {
+                    return MatrixInboundComposeResult::Ready(
+                        self.pending
+                            .remove(&key)
+                            .expect("pending lane exists")
+                            .batch,
+                    );
+                }
+                return MatrixInboundComposeResult::Buffered;
+            }
+
+            if self.pending.len() >= MAX_MATRIX_INBOUND_COMPOSER_LANES {
+                return Self::immediate(room_id, event, 0);
+            }
+            self.next_sequence = self.next_sequence.wrapping_add(1);
+            let inserted_key = key.clone();
+            self.pending.insert(
+                key,
+                PendingMatrixInboundBatch {
+                    batch: MatrixInboundBatch {
+                        room_id: room_id.to_string(),
+                        events: vec![event],
+                    },
+                    deadline: now + self.wait,
+                    sequence: self.next_sequence,
+                },
+            );
+            if self.max_events == 1 {
+                return MatrixInboundComposeResult::Ready(
+                    self.pending
+                        .remove(&inserted_key)
+                        .expect("inserted pending lane exists")
+                        .batch,
+                );
+            }
+            return MatrixInboundComposeResult::Buffered;
+        }
+
+        if matrix_text_body(&event).is_some() {
+            if let Some(key) = self.matching_key(room_id, &event) {
+                let mut pending = self.pending.remove(&key).expect("pending lane exists");
+                pending.batch.events.push(event);
+                return MatrixInboundComposeResult::Ready(pending.batch);
+            }
+        }
+
+        Self::immediate(room_id, event, 0)
+    }
+
+    fn next_deadline(&self) -> Option<tokio::time::Instant> {
+        self.pending.values().map(|pending| pending.deadline).min()
+    }
+
+    fn take_expired(&mut self, now: tokio::time::Instant) -> Vec<MatrixInboundBatch> {
+        let mut expired: Vec<_> = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.deadline <= now)
+            .map(|(key, pending)| (key.clone(), pending.sequence))
+            .collect();
+        expired.sort_by_key(|(_, sequence)| *sequence);
+        expired
+            .into_iter()
+            .filter_map(|(key, _)| self.pending.remove(&key).map(|pending| pending.batch))
+            .collect()
+    }
+
+    fn pending_event_count(&self) -> usize {
+        self.pending
+            .values()
+            .map(|pending| pending.batch.events.len())
+            .sum()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1102,24 +1312,103 @@ pub async fn run_matrix_adapter(
     #[cfg(feature = "filestore")] filestore: Option<Arc<crate::filestore::Filestore>>,
 ) -> Result<()> {
     let bot_turns = Arc::new(Mutex::new(BotTurnTracker::new(config.max_bot_turns)));
+    let mut composer = MatrixInboundComposer::new(
+        config.inbound_media_coalesce_ms,
+        config.inbound_media_coalesce_max_events,
+    );
     let mut backoff_secs = 1u64;
 
     loop {
         if *shutdown_rx.borrow() {
+            let pending_events = composer.pending_event_count();
+            if pending_events > 0 {
+                warn!(
+                    pending_events,
+                    "dropping pending Matrix media inputs during shutdown"
+                );
+            }
             return Ok(());
         }
+
+        let next_deadline = composer.next_deadline();
+        let deadline_wait = async move {
+            match next_deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         let sync = tokio::select! {
-            result = adapter.sync(Some(&since), false) => result,
-            _ = shutdown_rx.changed() => return Ok(()),
+            result = adapter.sync(Some(&since), false) => Some(result),
+            _ = deadline_wait => None,
+            _ = shutdown_rx.changed() => {
+                let pending_events = composer.pending_event_count();
+                if pending_events > 0 {
+                    warn!(pending_events, "dropping pending Matrix media inputs during shutdown");
+                }
+                return Ok(());
+            },
+        };
+        let Some(sync) = sync else {
+            for batch in composer.take_expired(tokio::time::Instant::now()) {
+                handle_matrix_event_batch(
+                    &batch.room_id,
+                    &batch.events,
+                    adapter.clone(),
+                    router.clone(),
+                    &config,
+                    bot_turns.clone(),
+                    &stt_config,
+                    dispatcher.clone(),
+                    #[cfg(feature = "filestore")]
+                    filestore.as_deref(),
+                )
+                .await;
+            }
+            continue;
         };
         let sync = match sync {
             Ok(sync) => sync,
             Err(err) => {
                 warn!(error = %err, backoff_secs, "Matrix sync failed; retrying");
-                match wait_backoff_or_shutdown(backoff_secs, &mut shutdown_rx).await {
-                    Some(next) => backoff_secs = next,
-                    None => return Ok(()),
+                let backoff_deadline =
+                    tokio::time::Instant::now() + Duration::from_secs(backoff_secs);
+                loop {
+                    let next_deadline = composer.next_deadline();
+                    let composer_wait = async move {
+                        match next_deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    };
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(backoff_deadline) => break,
+                        _ = composer_wait => {
+                            for batch in composer.take_expired(tokio::time::Instant::now()) {
+                                handle_matrix_event_batch(
+                                    &batch.room_id,
+                                    &batch.events,
+                                    adapter.clone(),
+                                    router.clone(),
+                                    &config,
+                                    bot_turns.clone(),
+                                    &stt_config,
+                                    dispatcher.clone(),
+                                    #[cfg(feature = "filestore")]
+                                    filestore.as_deref(),
+                                )
+                                .await;
+                            }
+                        }
+                        _ = shutdown_rx.changed() => {
+                            let pending_events = composer.pending_event_count();
+                            if pending_events > 0 {
+                                warn!(pending_events, "dropping pending Matrix media inputs during shutdown");
+                            }
+                            return Ok(());
+                        }
+                    }
                 }
+                backoff_secs = (backoff_secs.saturating_mul(2)).min(30);
                 continue;
             }
         };
@@ -1132,9 +1421,58 @@ pub async fn run_matrix_adapter(
                 if !adapter.seen_events.lock().await.insert(&event.event_id) {
                     continue;
                 }
-                handle_matrix_event(
-                    room_id,
-                    event,
+                let Some(own_user_id) = adapter.user_id.get() else {
+                    error!("Matrix identity unavailable after initialization");
+                    continue;
+                };
+                let statically_admitted =
+                    matrix_event_can_enter_media_composer(room_id, event, &config, own_user_id);
+                let composer_admitted = if statically_admitted
+                    && adapter.ensure_plaintext_room(room_id).await.is_ok()
+                {
+                    let is_bot = config.is_bot(&event.sender, own_user_id);
+                    if l3_gate_applies(is_bot) {
+                        let is_direct = adapter.room_is_direct(room_id).await;
+                        router
+                            .gate_incoming("matrix", room_id, is_direct, &event.sender)
+                            .is_allowed()
+                    } else {
+                        true
+                    }
+                } else {
+                    false
+                };
+                let composed = if composer_admitted {
+                    composer.ingest(
+                        room_id,
+                        event.clone(),
+                        own_user_id,
+                        tokio::time::Instant::now(),
+                    )
+                } else {
+                    MatrixInboundComposer::immediate(room_id, event.clone(), 0)
+                };
+                let batch = match composed {
+                    MatrixInboundComposeResult::Buffered => continue,
+                    MatrixInboundComposeResult::Ready(batch) => batch,
+                    MatrixInboundComposeResult::Immediate {
+                        batch,
+                        dropped_pending_events,
+                    } => {
+                        if dropped_pending_events > 0 {
+                            info!(
+                                room_id,
+                                sender_id = %event.sender,
+                                dropped_pending_events,
+                                "Matrix command cleared pending media input"
+                            );
+                        }
+                        batch
+                    }
+                };
+                handle_matrix_event_batch(
+                    &batch.room_id,
+                    &batch.events,
                     adapter.clone(),
                     router.clone(),
                     &config,
@@ -1152,9 +1490,9 @@ pub async fn run_matrix_adapter(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_matrix_event(
+async fn handle_matrix_event_batch(
     room_id: &str,
-    event: &MatrixEvent,
+    events: &[MatrixEvent],
     adapter: Arc<MatrixAdapter>,
     router: Arc<crate::adapter::AdapterRouter>,
     config: &MatrixRunConfig,
@@ -1163,12 +1501,30 @@ async fn handle_matrix_event(
     dispatcher: Arc<crate::dispatch::Dispatcher>,
     #[cfg(feature = "filestore")] filestore: Option<&crate::filestore::Filestore>,
 ) {
-    if event.event_type != "m.room.message"
-        || event.event_id.is_empty()
-        || event.sender.is_empty()
-        || is_replacement_event(event)
-    {
+    let Some(event) = events.last() else {
         return;
+    };
+    if events.iter().any(|candidate| {
+        candidate.event_type != "m.room.message"
+            || candidate.event_id.is_empty()
+            || candidate.sender.is_empty()
+            || candidate.sender != event.sender
+            || is_replacement_event(candidate)
+    }) {
+        return;
+    }
+    if events.len() > 1 {
+        debug!(
+            room_id,
+            sender_id = %event.sender,
+            raw_event_count = events.len(),
+            media_event_count = events
+                .iter()
+                .filter(|candidate| is_matrix_media_event(candidate))
+                .count(),
+            anchor_event_id = %event.event_id,
+            "reassembled Matrix media-first input"
+        );
     }
     if !config.allow_all_rooms && !config.allowed_rooms.contains(room_id) {
         return;
@@ -1178,13 +1534,24 @@ async fn handle_matrix_event(
         return;
     }
 
-    let Some(raw_prompt) = matrix_event_prompt(event) else {
+    let prompts: Vec<String> = events
+        .iter()
+        .filter_map(matrix_event_prompt)
+        .filter(|prompt| !prompt.trim().is_empty())
+        .collect();
+    if prompts.is_empty() && !events.iter().any(is_matrix_media_event) {
         return;
-    };
-    let (attachment, attachment_error) = match matrix_attachment(event) {
-        Ok(attachment) => (attachment, None),
-        Err(err) => (None, Some(err)),
-    };
+    }
+    let raw_prompt = prompts.join("\n");
+    let mut attachments = Vec::new();
+    let mut attachment_errors = Vec::new();
+    for candidate in events {
+        match matrix_attachment(candidate) {
+            Ok(Some(attachment)) => attachments.push(attachment),
+            Ok(None) => {}
+            Err(err) => attachment_errors.push(err),
+        }
+    }
     let Some(own_user_id) = adapter.user_id.get() else {
         error!("Matrix identity unavailable after initialization");
         return;
@@ -1248,7 +1615,9 @@ async fn handle_matrix_event(
         }
     }
 
-    let mentions_bot = event_mentions_user(event, own_user_id);
+    let mentions_bot = events
+        .iter()
+        .any(|candidate| event_mentions_user(candidate, own_user_id));
     let other_bot_present = adapter.other_bot_present(&logical_thread_id).await;
     let in_thread = event_thread_root(event).is_some();
     let participated = is_direct
@@ -1268,8 +1637,10 @@ async fn handle_matrix_event(
     );
     let thread_key = dispatcher.key("matrix", &logical_thread_id, &event.sender);
 
-    if let Some(command) =
-        matrix_text_body(event).and_then(|body| parse_control_command(body, own_user_id))
+    if let Some(command) = (events.len() == 1)
+        .then(|| matrix_text_body(event))
+        .flatten()
+        .and_then(|body| parse_control_command(body, own_user_id))
     {
         if is_bot && !should_process {
             return;
@@ -1287,23 +1658,27 @@ async fn handle_matrix_event(
         return;
     }
 
-    if let Some(body) = matrix_text_body(event) {
-        let config_command = strip_user_mention(body, own_user_id);
-        if let Some(response) = handle_config_command(&config_command, &router, &thread_key).await {
-            if is_bot && !should_process {
+    if events.len() == 1 {
+        if let Some(body) = matrix_text_body(event) {
+            let config_command = strip_user_mention(body, own_user_id);
+            if let Some(response) =
+                handle_config_command(&config_command, &router, &thread_key).await
+            {
+                if is_bot && !should_process {
+                    return;
+                }
+                let channel = ChannelRef {
+                    platform: "matrix".into(),
+                    channel_id: room_id.to_string(),
+                    thread_id: event_thread_root(event).map(str::to_string),
+                    parent_id: None,
+                    origin_event_id: None,
+                };
+                if let Err(err) = adapter.send_message(&channel, &response).await {
+                    warn!(error = %err, "failed to send Matrix config command response");
+                }
                 return;
             }
-            let channel = ChannelRef {
-                platform: "matrix".into(),
-                channel_id: room_id.to_string(),
-                thread_id: event_thread_root(event).map(str::to_string),
-                parent_id: None,
-                origin_event_id: None,
-            };
-            if let Err(err) = adapter.send_message(&channel, &response).await {
-                warn!(error = %err, "failed to send Matrix config command response");
-            }
-            return;
         }
     }
     if !should_process {
@@ -1311,7 +1686,7 @@ async fn handle_matrix_event(
     }
 
     let prompt = strip_user_mention(&raw_prompt, own_user_id);
-    if prompt.is_empty() && attachment.is_none() && attachment_error.is_none() {
+    if prompt.is_empty() && attachments.is_empty() && attachment_errors.is_empty() {
         return;
     }
     adapter.note_participated(&logical_thread_id).await;
@@ -1348,15 +1723,14 @@ async fn handle_matrix_event(
         &logical_thread_id,
         in_thread || config.thread_replies,
     );
-    let mut extra_blocks = Vec::new();
-    if adapter.outbound_file_enabled() {
-        extra_blocks.push(matrix_file_delivery_instruction());
-    }
+    let mut media_blocks = Vec::new();
     let mut echo_entries = Vec::new();
-    let mut warning =
-        attachment_error.map(|err| format!("⚠️ I couldn't process this Matrix attachment: {err}."));
+    let mut warnings: Vec<String> = attachment_errors
+        .into_iter()
+        .map(|err| format!("⚠️ I couldn't process this Matrix attachment: {err}."))
+        .collect();
     let mut audio_skipped = false;
-    if let Some(attachment) = attachment.as_ref() {
+    for attachment in &attachments {
         let outcome = process_matrix_attachment(
             &adapter,
             attachment,
@@ -1365,13 +1739,18 @@ async fn handle_matrix_event(
             filestore,
         )
         .await;
-        extra_blocks = outcome.blocks;
-        echo_entries = outcome.echo_entries;
-        warning = warning.or(outcome.warning);
-        audio_skipped = outcome.audio_skipped;
+        media_blocks.extend(outcome.blocks);
+        echo_entries.extend(outcome.echo_entries);
+        if let Some(warning) = outcome.warning {
+            warnings.push(warning);
+        }
+        audio_skipped |= outcome.audio_skipped;
     }
-    if let Some(warning) = warning {
-        if let Err(err) = adapter.send_message(&thread_channel, &warning).await {
+    if !warnings.is_empty() {
+        if let Err(err) = adapter
+            .send_message(&thread_channel, &warnings.join("\n"))
+            .await
+        {
             warn!(error = %err, "failed to send Matrix attachment warning");
         }
     }
@@ -1389,6 +1768,14 @@ async fn handle_matrix_event(
     )
     .await;
 
+    let mut extra_blocks = Vec::new();
+    // Preserve the pre-composer behavior: a valid inbound attachment owns the
+    // extra-block list, while text-only and attachment-error inputs still get
+    // the outbound-file capability instruction when configured.
+    if attachments.is_empty() && adapter.outbound_file_enabled() {
+        extra_blocks.push(matrix_file_delivery_instruction());
+    }
+    extra_blocks.extend(media_blocks);
     if prompt.is_empty() && extra_blocks.is_empty() {
         return;
     }
@@ -1664,6 +2051,38 @@ fn matrix_direct_inviter(invite: &Value) -> Option<&str> {
         .as_str()
 }
 
+fn is_matrix_media_event(event: &MatrixEvent) -> bool {
+    matches!(
+        event.content.get("msgtype").and_then(Value::as_str),
+        Some("m.image" | "m.audio" | "m.video" | "m.file")
+    )
+}
+
+fn matrix_event_can_enter_media_composer(
+    room_id: &str,
+    event: &MatrixEvent,
+    config: &MatrixRunConfig,
+    own_user_id: &str,
+) -> bool {
+    if config.inbound_media_coalesce_ms == 0
+        || event.event_type != "m.room.message"
+        || event.event_id.is_empty()
+        || event.sender.is_empty()
+        || event.sender == own_user_id
+        || is_replacement_event(event)
+        || (!config.allow_all_rooms && !config.allowed_rooms.contains(room_id))
+    {
+        return false;
+    }
+
+    let is_bot = config.is_bot(&event.sender, own_user_id);
+    if is_bot {
+        config.trusted_bot_ids.is_empty() || config.trusted_bot_ids.contains(&event.sender)
+    } else {
+        config.allow_all_users || config.allowed_users.contains(&event.sender)
+    }
+}
+
 fn matrix_event_body(event: &MatrixEvent) -> Option<&str> {
     match event.content.get("msgtype")?.as_str()? {
         "m.text" | "m.notice" | "m.image" | "m.audio" | "m.video" | "m.file" => {
@@ -1875,28 +2294,30 @@ fn prune_timed_cache(cache: &mut HashMap<String, tokio::time::Instant>, ttl: Dur
     }
 }
 
-async fn wait_backoff_or_shutdown(
-    backoff_secs: u64,
-    shutdown_rx: &mut watch::Receiver<bool>,
-) -> Option<u64> {
-    tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {
-            Some((backoff_secs.saturating_mul(2)).min(30))
-        }
-        _ = shutdown_rx.changed() => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn message_event(content: Value) -> MatrixEvent {
+        matrix_test_event(
+            "$event:example.com",
+            "@alice:example.com",
+            1_714_204_397_123,
+            content,
+        )
+    }
+
+    fn matrix_test_event(
+        event_id: &str,
+        sender: &str,
+        origin_server_ts: i64,
+        content: Value,
+    ) -> MatrixEvent {
         MatrixEvent {
             event_type: "m.room.message".into(),
-            event_id: "$event:example.com".into(),
-            sender: "@alice:example.com".into(),
-            origin_server_ts: 1_714_204_397_123,
+            event_id: event_id.into(),
+            sender: sender.into(),
+            origin_server_ts,
             content,
         }
     }
@@ -2034,6 +2455,357 @@ mod tests {
         }));
         assert_eq!(event_thread_root(&event), Some("$root"));
         assert!(event_mentions_user(&event, "@openab:example.com"));
+    }
+
+    #[test]
+    fn media_composer_capacity_requires_static_admission() {
+        let cfg: MatrixConfig = toml::from_str(
+            r#"
+homeserver_url = "https://matrix.example.com"
+access_token = "token"
+allowed_rooms = ["!allowed:example.com"]
+allowed_users = ["@alice:example.com"]
+bot_user_ids = ["@untrusted-bot:example.com"]
+trusted_bot_ids = ["@trusted-bot:example.com"]
+inbound_media_coalesce_ms = 2000
+"#,
+        )
+        .unwrap();
+        let run = MatrixRunConfig::from_config(&cfg);
+        let event = |sender: &str| {
+            matrix_test_event(
+                "$image",
+                sender,
+                1,
+                json!({
+                    "msgtype": "m.image",
+                    "body": "photo.png",
+                    "url": "mxc://example.com/photo"
+                }),
+            )
+        };
+
+        assert!(matrix_event_can_enter_media_composer(
+            "!allowed:example.com",
+            &event("@alice:example.com"),
+            &run,
+            "@bot:example.com"
+        ));
+        assert!(!matrix_event_can_enter_media_composer(
+            "!denied:example.com",
+            &event("@alice:example.com"),
+            &run,
+            "@bot:example.com"
+        ));
+        assert!(!matrix_event_can_enter_media_composer(
+            "!allowed:example.com",
+            &event("@mallory:example.com"),
+            &run,
+            "@bot:example.com"
+        ));
+        assert!(!matrix_event_can_enter_media_composer(
+            "!allowed:example.com",
+            &event("@untrusted-bot:example.com"),
+            &run,
+            "@bot:example.com"
+        ));
+        assert!(matrix_event_can_enter_media_composer(
+            "!allowed:example.com",
+            &event("@trusted-bot:example.com"),
+            &run,
+            "@bot:example.com"
+        ));
+        assert!(!matrix_event_can_enter_media_composer(
+            "!allowed:example.com",
+            &event("@bot:example.com"),
+            &run,
+            "@bot:example.com"
+        ));
+    }
+
+    #[test]
+    fn media_first_composer_combines_attachment_and_trailing_text() {
+        let now = tokio::time::Instant::now();
+        let mut composer = MatrixInboundComposer::new(2_000, 10);
+        let image = matrix_test_event(
+            "$image",
+            "@alice:example.com",
+            1,
+            json!({
+                "msgtype": "m.image",
+                "body": "photo.png",
+                "url": "mxc://example.com/photo",
+                "info": { "mimetype": "image/png", "size": 42 }
+            }),
+        );
+        assert!(matches!(
+            composer.ingest("!room:example.com", image, "@bot:example.com", now),
+            MatrixInboundComposeResult::Buffered
+        ));
+
+        let file = matrix_test_event(
+            "$file",
+            "@alice:example.com",
+            2,
+            json!({
+                "msgtype": "m.file",
+                "body": "report.pdf",
+                "url": "mxc://example.com/report",
+                "info": { "mimetype": "application/pdf", "size": 84 }
+            }),
+        );
+        assert!(matches!(
+            composer.ingest(
+                "!room:example.com",
+                file,
+                "@bot:example.com",
+                now + Duration::from_millis(250),
+            ),
+            MatrixInboundComposeResult::Buffered
+        ));
+
+        let text = matrix_test_event(
+            "$text",
+            "@alice:example.com",
+            3,
+            json!({
+                "msgtype": "m.text",
+                "body": "@bot:example.com please inspect",
+                "m.mentions": { "user_ids": ["@bot:example.com"] }
+            }),
+        );
+        let MatrixInboundComposeResult::Ready(batch) = composer.ingest(
+            "!room:example.com",
+            text,
+            "@bot:example.com",
+            now + Duration::from_millis(500),
+        ) else {
+            panic!("trailing text must flush the media-first batch");
+        };
+        assert_eq!(batch.events.len(), 3);
+        assert_eq!(batch.events[0].event_id, "$image");
+        assert_eq!(batch.events[1].event_id, "$file");
+        assert_eq!(batch.events[2].event_id, "$text");
+        assert_eq!(
+            batch
+                .events
+                .iter()
+                .filter_map(|event| matrix_attachment(event).unwrap())
+                .map(|attachment| attachment.filename)
+                .collect::<Vec<_>>(),
+            vec!["photo.png", "report.pdf"]
+        );
+        assert!(batch
+            .events
+            .iter()
+            .any(|event| event_mentions_user(event, "@bot:example.com")));
+        assert_eq!(
+            batch
+                .events
+                .iter()
+                .filter_map(matrix_event_prompt)
+                .filter(|prompt| !prompt.is_empty())
+                .collect::<Vec<_>>(),
+            vec!["@bot:example.com please inspect"]
+        );
+        assert!(composer.next_deadline().is_none());
+    }
+
+    #[test]
+    fn media_first_composer_preserves_multiple_media_until_timeout() {
+        let now = tokio::time::Instant::now();
+        let mut composer = MatrixInboundComposer::new(2_000, 10);
+        for (index, msgtype) in ["m.image", "m.file"].into_iter().enumerate() {
+            let event = matrix_test_event(
+                &format!("$media-{index}"),
+                "@alice:example.com",
+                index as i64,
+                json!({
+                    "msgtype": msgtype,
+                    "body": format!("file-{index}"),
+                    "url": format!("mxc://example.com/{index}"),
+                    "info": { "mimetype": "application/octet-stream", "size": 1 }
+                }),
+            );
+            assert!(matches!(
+                composer.ingest(
+                    "!room:example.com",
+                    event,
+                    "@bot:example.com",
+                    now + Duration::from_millis(index as u64 * 500),
+                ),
+                MatrixInboundComposeResult::Buffered
+            ));
+        }
+
+        assert!(composer
+            .take_expired(now + Duration::from_millis(2_499))
+            .is_empty());
+        let expired = composer.take_expired(now + Duration::from_millis(2_500));
+        assert_eq!(expired.len(), 1);
+        assert_eq!(
+            expired[0]
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["$media-0", "$media-1"]
+        );
+    }
+
+    #[test]
+    fn media_first_composer_does_not_delay_text_or_cross_senders() {
+        let now = tokio::time::Instant::now();
+        let mut composer = MatrixInboundComposer::new(2_000, 10);
+        let image = matrix_test_event(
+            "$image",
+            "@alice:example.com",
+            1,
+            json!({
+                "msgtype": "m.image",
+                "body": "photo.png",
+                "url": "mxc://example.com/photo"
+            }),
+        );
+        assert!(matches!(
+            composer.ingest("!room:example.com", image, "@bot:example.com", now),
+            MatrixInboundComposeResult::Buffered
+        ));
+
+        let bob_text = matrix_test_event(
+            "$bob-text",
+            "@bob:example.com",
+            2,
+            json!({ "msgtype": "m.text", "body": "hello" }),
+        );
+        assert!(matches!(
+            composer.ingest("!room:example.com", bob_text, "@bot:example.com", now),
+            MatrixInboundComposeResult::Immediate { .. }
+        ));
+        assert_eq!(composer.pending_event_count(), 1);
+
+        let mut empty = MatrixInboundComposer::new(2_000, 10);
+        let plain_text = matrix_test_event(
+            "$plain",
+            "@alice:example.com",
+            3,
+            json!({ "msgtype": "m.text", "body": "plain" }),
+        );
+        assert!(matches!(
+            empty.ingest("!room:example.com", plain_text, "@bot:example.com", now),
+            MatrixInboundComposeResult::Immediate { .. }
+        ));
+    }
+
+    #[test]
+    fn media_first_composer_matches_thread_reply_to_top_level_media() {
+        let now = tokio::time::Instant::now();
+        let mut composer = MatrixInboundComposer::new(2_000, 10);
+        let image = matrix_test_event(
+            "$image-root",
+            "@alice:example.com",
+            1,
+            json!({
+                "msgtype": "m.image",
+                "body": "photo.png",
+                "url": "mxc://example.com/photo"
+            }),
+        );
+        assert!(matches!(
+            composer.ingest("!room:example.com", image, "@bot:example.com", now),
+            MatrixInboundComposeResult::Buffered
+        ));
+        let reply = matrix_test_event(
+            "$reply",
+            "@alice:example.com",
+            2,
+            json!({
+                "msgtype": "m.text",
+                "body": "caption",
+                "m.relates_to": { "rel_type": "m.thread", "event_id": "$image-root" }
+            }),
+        );
+        let MatrixInboundComposeResult::Ready(batch) =
+            composer.ingest("!room:example.com", reply, "@bot:example.com", now)
+        else {
+            panic!("thread reply must close its top-level media batch");
+        };
+        assert_eq!(batch.events.len(), 2);
+        assert_eq!(event_thread_root(&batch.events[1]), Some("$image-root"));
+    }
+
+    #[test]
+    fn media_first_composer_commands_clear_pending_lane() {
+        let now = tokio::time::Instant::now();
+        let mut composer = MatrixInboundComposer::new(2_000, 10);
+        let image = matrix_test_event(
+            "$image",
+            "@alice:example.com",
+            1,
+            json!({
+                "msgtype": "m.image",
+                "body": "photo.png",
+                "url": "mxc://example.com/photo"
+            }),
+        );
+        assert!(matches!(
+            composer.ingest("!room:example.com", image, "@bot:example.com", now),
+            MatrixInboundComposeResult::Buffered
+        ));
+        let cancel = matrix_test_event(
+            "$cancel",
+            "@alice:example.com",
+            2,
+            json!({ "msgtype": "m.text", "body": "@bot:example.com /cancel" }),
+        );
+        let MatrixInboundComposeResult::Immediate {
+            dropped_pending_events,
+            ..
+        } = composer.ingest("!room:example.com", cancel, "@bot:example.com", now)
+        else {
+            panic!("commands must bypass media coalescing");
+        };
+        assert_eq!(dropped_pending_events, 1);
+        assert_eq!(composer.pending_event_count(), 0);
+    }
+
+    #[test]
+    fn media_first_composer_honors_event_cap_and_disabled_mode() {
+        let now = tokio::time::Instant::now();
+        let media = |event_id: &str| {
+            matrix_test_event(
+                event_id,
+                "@alice:example.com",
+                1,
+                json!({
+                    "msgtype": "m.file",
+                    "body": "report.pdf",
+                    "url": "mxc://example.com/report"
+                }),
+            )
+        };
+        let mut capped = MatrixInboundComposer::new(2_000, 2);
+        assert!(matches!(
+            capped.ingest("!room:example.com", media("$one"), "@bot:example.com", now),
+            MatrixInboundComposeResult::Buffered
+        ));
+        let MatrixInboundComposeResult::Ready(batch) =
+            capped.ingest("!room:example.com", media("$two"), "@bot:example.com", now)
+        else {
+            panic!("event cap must flush the batch");
+        };
+        assert_eq!(batch.events.len(), 2);
+
+        let mut disabled = MatrixInboundComposer::new(0, 10);
+        assert!(matches!(
+            disabled.ingest(
+                "!room:example.com",
+                media("$disabled"),
+                "@bot:example.com",
+                now
+            ),
+            MatrixInboundComposeResult::Immediate { .. }
+        ));
     }
 
     #[test]

@@ -47,6 +47,9 @@ sync_timeout_seconds = 30
 thread_replies = true
 # outbound_file_root = "/workspace"
 streaming = true
+# Optional: reconstruct file/image-first input bursts before one ACP turn.
+# inbound_media_coalesce_ms = 2000
+# inbound_media_coalesce_max_events = 10
 
 [agent]
 command = "kiro-cli"
@@ -67,6 +70,26 @@ When `auto_join_invites = true`, OpenAB accepts invitations only when the room I
 - Streaming uses an initial event followed by `m.replace` edits. It is disabled after another configured bot appears in the thread.
 - Matrix event IDs are used as message and thread IDs. Session keys are namespaced as `matrix:<thread-root-event-id>`.
 - On startup, OpenAB performs a full-state sync to learn encryption and direct-room state, records the returned cursor, and does not dispatch the historical timeline from that initial sync.
+
+### Media-first input composition
+
+Some Matrix clients deliver a user's intended “attachments plus instructions” input as separate events: one or more media events first, followed by a text event. Set `inbound_media_coalesce_ms` to a non-zero window (for example `2000`) to reconstruct that transport-level burst as one ACP input. The default is `0`, preserving immediate per-event behavior.
+
+Composition is deliberately media-first rather than a general message debounce:
+
+- ordinary text with no pending media dispatches immediately;
+- the first media event opens a lane keyed by room, sender, and thread scope;
+- additional media from that lane reset the timer and retain arrival order;
+- the first following text event closes the lane immediately and becomes the prompt for all accumulated attachments;
+- a pure image/file burst closes when the timer expires;
+- `inbound_media_coalesce_max_events` (default `10`, range `1`–`100`) flushes a burst that reaches the cap;
+- different senders, rooms, and existing threads never share a lane;
+- a text event threaded directly from the first pending top-level media event may close that media lane;
+- slash commands bypass composition and clear pending media in the matching lane, so `/cancel`, `/cancel-all`, and model commands are never interpreted as attachment instructions.
+
+Room/user admission is checked before an event may consume composer capacity. Mention gating is evaluated over the completed synthetic input, so a file without a mention followed by `@bot please inspect this` works in admitted group rooms. The final event supplies the synthetic message ID, timestamp, reaction anchor, and reply/thread routing. Media are processed in arrival order; the shared arrival packer still places transcript/text attachment blocks before the prompt and image blocks after it. This adapter-level reconstruction happens before the shared `Dispatcher`, whose per-arrival batching contract remains unchanged.
+
+A non-zero window adds that much latency to pure media input. Pending composer state is in memory only; a process shutdown or crash during the short window can discard those not-yet-dispatched events, and shutdown logs the pending count.
 
 ## Attachments and media
 
@@ -93,8 +116,10 @@ Other adapters retain the existing text-only ACP output behavior described in [s
 
 In a room or thread admitted by the room/user policy:
 
-- `/cancel` stops the active ACP turn and leaves buffered messages intact.
-- `/cancel-all` stops the active turn and clears buffered messages for the Matrix thread.
+- `/cancel` stops the active ACP turn and leaves already-submitted Dispatcher messages intact.
+- `/cancel-all` stops the active turn and clears already-submitted buffered messages for the Matrix thread.
+
+Both commands bypass media-first composition and discard not-yet-submitted media in their matching composer lane, preventing a timer from starting a new turn immediately after cancellation. Other slash commands also bypass and clear that lane rather than becoming attachment instructions.
 
 An optional exact bot MXID prefix is accepted, for example:
 

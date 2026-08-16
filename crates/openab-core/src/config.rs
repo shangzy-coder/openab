@@ -736,6 +736,13 @@ pub struct MatrixConfig {
     /// Stream replies by sending a placeholder and Matrix `m.replace` edits.
     #[serde(default = "default_true")]
     pub streaming: bool,
+    /// Opt-in wait window for reconstructing a media-first Matrix input burst.
+    /// Zero preserves immediate per-event dispatch.
+    #[serde(default)]
+    pub inbound_media_coalesce_ms: u64,
+    /// Maximum raw Matrix events in one reconstructed media-first input.
+    #[serde(default = "default_matrix_inbound_media_coalesce_max_events")]
+    pub inbound_media_coalesce_max_events: usize,
     #[serde(default)]
     pub message_processing_mode: MessageProcessingMode,
     #[serde(default = "default_max_buffered_messages")]
@@ -746,6 +753,10 @@ pub struct MatrixConfig {
 
 fn default_matrix_sync_timeout_seconds() -> u64 {
     30
+}
+
+fn default_matrix_inbound_media_coalesce_max_events() -> usize {
+    10
 }
 
 #[derive(Debug, Deserialize)]
@@ -2440,6 +2451,14 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
             (1..=60).contains(&m.sync_timeout_seconds),
             "matrix.sync_timeout_seconds must be between 1 and 60"
         );
+        anyhow::ensure!(
+            m.inbound_media_coalesce_ms <= 60_000,
+            "matrix.inbound_media_coalesce_ms must be between 0 and 60000"
+        );
+        anyhow::ensure!(
+            (1..=100).contains(&m.inbound_media_coalesce_max_events),
+            "matrix.inbound_media_coalesce_max_events must be between 1 and 100"
+        );
     }
     if let Some(ref g) = config.gateway {
         anyhow::ensure!(
@@ -4008,6 +4027,8 @@ command = "echo"
         assert!(cfg.thread_replies);
         assert!(cfg.outbound_file_root.is_none());
         assert!(cfg.streaming);
+        assert_eq!(cfg.inbound_media_coalesce_ms, 0);
+        assert_eq!(cfg.inbound_media_coalesce_max_events, 10);
     }
 
     #[test]
@@ -4024,6 +4045,8 @@ bot_user_ids = ["@bot:example.com"]
 thread_replies = false
 outbound_file_root = "/workspace"
 streaming = false
+inbound_media_coalesce_ms = 2000
+inbound_media_coalesce_max_events = 12
 
 [agent]
 command = "echo"
@@ -4039,6 +4062,8 @@ command = "echo"
         assert!(!matrix.thread_replies);
         assert_eq!(matrix.outbound_file_root.as_deref(), Some("/workspace"));
         assert!(!matrix.streaming);
+        assert_eq!(matrix.inbound_media_coalesce_ms, 2000);
+        assert_eq!(matrix.inbound_media_coalesce_max_events, 12);
 
         let err = parse_config(
             r#"
@@ -4056,6 +4081,40 @@ command = "echo"
         assert!(err
             .to_string()
             .contains("matrix.sync_timeout_seconds must be between 1 and 60"));
+
+        let err = parse_config(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example.com"
+access_token = "token"
+inbound_media_coalesce_ms = 60001
+
+[agent]
+command = "echo"
+"#,
+            "test",
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("matrix.inbound_media_coalesce_ms must be between 0 and 60000"));
+
+        let err = parse_config(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example.com"
+access_token = "token"
+inbound_media_coalesce_max_events = 0
+
+[agent]
+command = "echo"
+"#,
+            "test",
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("matrix.inbound_media_coalesce_max_events must be between 1 and 100"));
     }
 
     #[test]
