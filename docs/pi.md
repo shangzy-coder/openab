@@ -47,7 +47,7 @@ Pi saves session history as trees, enabling clean branching of code exploration.
 
 ```toml
 [agent]
-# command defaults from OPENAB_AGENT_COMMAND="openab-agent"
+# command defaults from OPENAB_AGENT_COMMAND="pi-acp"
 # working_dir = "/home/node"  # optional — defaults to $HOME
 ```
 
@@ -66,6 +66,7 @@ agents:
       enabled: true
       allowedChannels:
         - "YOUR_CHANNEL_ID"
+    # Optional: the Pi image already defaults to pi-acp.
     command: pi-acp
     workingDir: /home/node
     image: "ghcr.io/openabdev/openab:beta-pi"

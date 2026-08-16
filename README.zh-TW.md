@@ -6,7 +6,7 @@
 
 ![OpenAB banner](images/banner.jpg)
 
-一個輕量、安全、雲端原生的 ACP harness，透過 stdio JSON-RPC 將 **Discord、Slack** 與任何相容於 [Agent Client Protocol](https://github.com/anthropics/agent-protocol) 的程式開發 CLI（Kiro CLI、Claude Code、Codex、Gemini、OpenCode、MiMo-Code、Kimi Code、Copilot CLI、Hermes、Grok Build、Devin、Antigravity、Pi 等）連接起來，帶來新一代的開發體驗。**Telegram、LINE、Feishu/Lark、Google Chat、WeCom 與 Microsoft Teams** 則由 gateway adapters 支援；可將 adapters 編入 unified binary，或部署為獨立的 [Custom Gateway](crates/openab-gateway/)。
+一個輕量、安全、雲端原生的 ACP harness，透過 stdio JSON-RPC 將 **Discord、Slack、Matrix** 與任何相容於 [Agent Client Protocol](https://github.com/anthropics/agent-protocol) 的程式開發 CLI（Kiro CLI、Claude Code、Codex、Gemini、OpenCode、MiMo-Code、Kimi Code、Copilot CLI、Hermes、Grok Build、Devin、Antigravity、Pi 等）連接起來，帶來新一代的開發體驗。**Telegram、LINE、Feishu/Lark、Google Chat、WeCom 與 Microsoft Teams** 則由 gateway adapters 支援；可將 adapters 編入 unified binary，或部署為獨立的 [Custom Gateway](crates/openab-gateway/)。
 
 🪼 **加入我們的社群！** 歡迎到 Discord 和大家打招呼：**[🪼 OpenAB — Official](https://openab.dev/discord)** 🎉
 
@@ -52,7 +52,7 @@ platforms 使用 `webhook/API`，Feishu/Lark 則使用 `WS/webhook`。
 
 ## 功能特色
 
-- **多平台支援** — 支援 Discord 與 Slack，可單獨或同時執行
+- **多平台支援** — 支援 Discord、Slack 與未加密的 Matrix rooms，可單獨或同時執行
 - **Gateway adapters** — 可透過獨立的 [gateway](crates/openab-gateway/) 或 opt-in unified build 擴充至 Telegram、LINE、Feishu/Lark、Google Chat、WeCom 與 Microsoft Teams
 - **可替換的 agent backend** — 可透過設定在 Kiro CLI、Claude Code、Codex、Gemini、OpenCode、MiMo-Code、Kimi Code、Copilot CLI、Hermes、Grok Build、Devin、Antigravity、Pi 之間切換
 - **@mention 觸發** — 在允許的頻道中 mention bot，即可開始對話
@@ -100,6 +100,13 @@ platforms 使用 `webhook/API`，Feishu/Lark 則使用 `WS/webhook`。
 <summary><strong>Slack</strong></summary>
 
 詳細步驟請參閱 [docs/slack.md](docs/slack.md)。
+
+</details>
+
+<details>
+<summary><strong>Matrix</strong></summary>
+
+設定方式與未加密 room 的安全邊界請參閱 [docs/matrix.md](docs/matrix.md)。
 
 </details>
 

@@ -44,9 +44,9 @@ thread_id = ""                               # optional: post to existing thread
 |-------|----------|---------|-------------|
 | `enabled` | | `true` | Set `false` to disable without removing the entry |
 | `schedule` | ✅ | — | 5-field POSIX cron expression |
-| `channel` | ✅ | — | Discord channel/thread ID, Slack channel ID, Mattermost channel ID, Telegram chat ID, Google Chat space name, or LINE WORKS channel ID / `user:<userId>` |
+| `channel` | ✅ | — | Discord channel/thread ID, Slack channel ID, Mattermost channel ID, Matrix room ID, Telegram chat ID, Google Chat space name, or LINE WORKS channel ID / `user:<userId>` |
 | `message` | ✅ | — | Message sent to the agent as a prompt |
-| `platform` | | `"discord"` | `"discord"`, `"slack"`, `"mattermost"`, `"telegram"`, `"googlechat"`, or `"lineworks"` (non-default platforms require their feature) |
+| `platform` | | `"discord"` | `"discord"`, `"slack"`, `"mattermost"`, `"matrix"`, `"telegram"`, `"googlechat"`, or `"lineworks"` (non-default platforms require their feature) |
 | `sender_name` | | `"openab-cron"` | Attribution shown in prompt context |
 | `timezone` | | `"UTC"` | IANA timezone (e.g. `"America/New_York"`, `"Europe/Berlin"`) |
 | `thread_id` | | — | Post into an existing thread instead of the channel |

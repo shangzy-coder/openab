@@ -2,7 +2,7 @@
 
 OpenAB is configured via a TOML file (default: `config.toml`). Environment variables can be interpolated using `${VAR_NAME}` syntax.
 
-At least one adapter section (`[discord]`, `[slack]`, or `[mattermost]`) is required, unless OpenAB is running in `[mcp]` facade-only mode.
+At least one adapter section (`[discord]`, `[slack]`, `[mattermost]`, or `[matrix]`) is required, unless OpenAB is running in `[mcp]` facade-only mode.
 
 ## Loading Config
 
@@ -133,6 +133,54 @@ Mattermost adapter using the v4 REST API for outbound actions and `/api/v4/webso
 | `streaming` | bool | `true` | Create a placeholder post and update it through `PUT /posts/{post_id}/patch`. Automatically suppressed in known multi-bot threads. |
 
 Mattermost thread mapping is deterministic: an incoming reply uses its existing `root_id`; a top-level `@bot` trigger uses that post's `id` as the new root. Attachment ingestion is not included in the first Mattermost adapter version; text in posts containing files is still processed, but attachment-only posts are ignored.
+
+---
+
+## `[matrix]`
+
+Matrix Client-Server API adapter. It authenticates with an access token and receives events through `/sync` long polling. The initial sync establishes a fresh cursor, so historical timeline events are not replayed as prompts after startup.
+
+> **Encryption boundary:** the current adapter supports unencrypted rooms only. It detects `m.room.encryption` state and refuses both inbound processing and outbound plaintext in encrypted rooms. E2EE requires a persistent Matrix crypto store and is not silently downgraded.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `homeserver_url` | string | *required* | Homeserver root URL, for example `https://matrix.example.com`. |
+| `access_token` | string | *required* | Matrix access token. Use `${MATRIX_ACCESS_TOKEN}` rather than storing a literal. |
+| `allow_insecure_http` | bool | `false` | Permit bearer authentication over non-loopback HTTP. Use only on a trusted private network; HTTPS and loopback HTTP need no override. |
+| `user_id` | string \| omit | from `/account/whoami` | Optional expected bot MXID. Startup fails when it does not match the token identity. |
+| `allowed_rooms` | string[] | `[]` | Admitted Matrix room IDs (`!room:server`). |
+| `allow_all_rooms` | bool | `false` | Allow every joined unencrypted room. The secure default denies all rooms. |
+| `auto_join_invites` | bool | `false` | Automatically accept room invitations admitted by `allowed_rooms` / `allow_all_rooms`. Encrypted rooms remain unusable without E2EE support. |
+| `allowed_users` | string[] | `[]` | Admitted sender MXIDs (`@user:server`). |
+| `allow_all_users` | bool | `false` | Allow every sender. The secure default denies all users. |
+| `bot_user_ids` | string[] | `[]` | MXIDs classified as bots. Matrix has no standard `is_bot` event field, so bot classification must be explicit. `trusted_bot_ids` are implicitly classified as bots too. |
+| `allow_bot_messages` | string | `"off"` | `"off"`, `"mentions"`, or `"all"`, matching the Discord policy. |
+| `trusted_bot_ids` | string[] | `[]` | When non-empty, only these configured bot MXIDs may trigger OpenAB. A trusted explicit mention overrides `allow_bot_messages = "off"`. |
+| `allow_user_messages` | string | `"multibot-mentions"` | Thread follow-up policy, matching Discord and Slack. |
+| `max_bot_turns` | u32 | `100` | Consecutive bot-turn soft limit. |
+| `sync_timeout_seconds` | u64 | `30` | `/sync` long-poll timeout; must be between 1 and 60. |
+| `thread_replies` | bool | `true` | Reply to top-level triggers in an `m.thread`. Set `false` to keep replies top-level; messages received inside an existing thread still receive in-thread replies. |
+| `outbound_file_root` | string \| omit | disabled | Opt in to Matrix-native agent file uploads. Only regular files that canonicalize beneath this directory can be uploaded; maximum 50 MiB. |
+| `streaming` | bool | `true` | Stream with a placeholder followed by Matrix `m.replace` edits. Disabled when another configured bot is present. |
+| `message_processing_mode` | string | `"per-message"` | Same as Discord. See [Message Dispatch Modes](message-dispatch-modes.md). |
+| `max_buffered_messages` | u32 | `10` | Same as Discord; must be greater than zero. |
+| `max_batch_tokens` | u32 | `24000` | Same as Discord; must be greater than zero. |
+
+```toml
+[matrix]
+homeserver_url = "https://matrix.example.com"
+access_token = "${MATRIX_ACCESS_TOKEN}"
+user_id = "@openab:example.com"
+allowed_rooms = ["!engineering:example.com"]
+# auto_join_invites = false
+allowed_users = ["@alice:example.com"]
+allow_bot_messages = "off"
+thread_replies = true
+# outbound_file_root = "/workspace"
+streaming = true
+```
+
+See [Matrix setup](matrix.md) for token, room, thread, and security guidance.
 
 ---
 

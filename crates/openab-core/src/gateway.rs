@@ -376,7 +376,7 @@ async fn send_fire_and_forget(
 ///   /agent list       — numbered list of available agents
 ///   /agent set <name> — switch by exact name or number
 ///   /agents           — alias of /agent list
-async fn handle_config_command(
+pub(crate) async fn handle_config_command(
     trimmed: &str,
     router: &AdapterRouter,
     thread_key: &str,

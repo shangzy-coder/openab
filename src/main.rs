@@ -1,3 +1,7 @@
+#[cfg(feature = "acp")]
+mod acp_tunnel;
+#[cfg(feature = "acp")]
+mod acp_tunnel_source;
 mod ctl;
 #[cfg(any(
     feature = "telegram",
@@ -10,10 +14,6 @@ mod ctl;
     feature = "lineworks",
 ))]
 mod unified_adapter;
-#[cfg(feature = "acp")]
-mod acp_tunnel;
-#[cfg(feature = "acp")]
-mod acp_tunnel_source;
 use openab_core::acp;
 use openab_core::adapter::{self, AdapterRouter};
 use openab_core::bot_turns;
@@ -24,6 +24,10 @@ use openab_core::discord;
 use openab_core::dispatch;
 use openab_core::gateway;
 use openab_core::hooks;
+#[cfg(feature = "matrix")]
+use openab_core::matrix;
+#[cfg(feature = "mattermost")]
+use openab_core::mattermost;
 use openab_core::multibot_cache;
 #[cfg(feature = "discord")]
 use openab_core::remind;
@@ -31,8 +35,6 @@ use openab_core::secrets;
 use openab_core::setup;
 #[cfg(feature = "slack")]
 use openab_core::slack;
-#[cfg(feature = "mattermost")]
-use openab_core::mattermost;
 
 use clap::Parser;
 #[cfg(feature = "discord")]
@@ -73,7 +75,7 @@ async fn shutdown_signal() {
 
 #[derive(Parser)]
 #[command(name = "openab", version)]
-#[command(about = "Multi-platform ACP agent broker (Discord, Slack, Mattermost)", long_about = None)]
+#[command(about = "Multi-platform ACP agent broker (Discord, Slack, Mattermost, Matrix)", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -414,6 +416,7 @@ async fn main() -> anyhow::Result<()> {
         discord = cfg.discord.is_some(),
         slack = cfg.slack.is_some(),
         mattermost = cfg.mattermost.is_some(),
+        matrix = cfg.matrix.is_some(),
         reactions = cfg.reactions.enabled,
         "config loaded"
     );
@@ -421,6 +424,7 @@ async fn main() -> anyhow::Result<()> {
     if cfg.discord.is_none()
         && cfg.slack.is_none()
         && cfg.mattermost.is_none()
+        && cfg.matrix.is_none()
         && cfg.gateway.is_none()
         && cfg.telegram.is_none()
         && !has_unified_platform(&cfg)
@@ -443,7 +447,7 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("OAB MCP facade exited: {e:#}"));
         }
         anyhow::bail!(
-            "no adapter configured — add [discord], [slack], [mattermost], [telegram], [wecom], [googlechat], or [gateway] to config (or [mcp] for facade-only mode), or set platform env vars (TELEGRAM_BOT_TOKEN, etc.)"
+            "no adapter configured — add [discord], [slack], [mattermost], [matrix], [telegram], [wecom], [googlechat], or [gateway] to config (or [mcp] for facade-only mode), or set platform env vars (TELEGRAM_BOT_TOKEN, etc.)"
         );
     }
 
@@ -451,6 +455,13 @@ async fn main() -> anyhow::Result<()> {
     if cfg.mattermost.is_some() {
         anyhow::bail!(
             "[mattermost] is configured, but this openab binary was built without the 'mattermost' feature"
+        );
+    }
+
+    #[cfg(not(feature = "matrix"))]
+    if cfg.matrix.is_some() {
+        anyhow::bail!(
+            "[matrix] is configured, but this openab binary was built without the 'matrix' feature"
         );
     }
 
@@ -506,8 +517,8 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "acp")]
     let acp_tunnel_registry = openab_gateway::adapters::acp_server::new_tunnel_registry();
     #[cfg(feature = "acp")]
-    let acp_tunnel: Arc<dyn openab_core::acp_mcp::AcpMcpTunnel> = Arc::new(
-        acp_tunnel::RootAcpTunnel::new(
+    let acp_tunnel: Arc<dyn openab_core::acp_mcp::AcpMcpTunnel> =
+        Arc::new(acp_tunnel::RootAcpTunnel::new(
             acp_tunnel_registry.clone(),
             // Browser control requires `[mcp]`, so the absent case is unreachable in practice;
             // fall back through the SAME function serde uses rather than repeating the literal.
@@ -522,8 +533,7 @@ async fn main() -> anyhow::Result<()> {
                 openab_gateway::adapters::acp_server::warn_if_tunnel_timeout_is_ineffective(t);
                 t
             },
-        ),
-    );
+        ));
 
     // OAB MCP Facade (`[mcp]` in config.toml — OAB MCP Adapter ADR §6.2):
     // serve the loopback Streamable HTTP MCP server in-process so any coding
@@ -554,15 +564,13 @@ async fn main() -> anyhow::Result<()> {
         // be skipped in bridge mode; with the bridge gone there is no mode in which the facade
         // runs without it.
         #[cfg(feature = "acp")]
-        let sources: Vec<Arc<dyn openab_mcp::mcp::sources::CapabilitySource>> =
-            vec![Arc::new(acp_tunnel_source::AcpTunnelSource::new(
-                acp_tunnel.clone(),
-            ))];
+        let sources: Vec<Arc<dyn openab_mcp::mcp::sources::CapabilitySource>> = vec![Arc::new(
+            acp_tunnel_source::AcpTunnelSource::new(acp_tunnel.clone()),
+        )];
         #[cfg(not(feature = "acp"))]
         let sources: Vec<Arc<dyn openab_mcp::mcp::sources::CapabilitySource>> = Vec::new();
         tokio::spawn(async move {
-            if let Err(e) =
-                openab_mcp::mcp::facade::serve_http_with(&listen, sources, tokens).await
+            if let Err(e) = openab_mcp::mcp::facade::serve_http_with(&listen, sources, tokens).await
             {
                 tracing::error!(error = %format!("{e:#}"), listen, "OAB MCP facade exited");
                 std::process::exit(1);
@@ -590,7 +598,10 @@ async fn main() -> anyhow::Result<()> {
         facade_serving.then(|| {
             format!(
                 "http://{}/mcp",
-                cfg.mcp.as_ref().map(|m| m.listen.as_str()).unwrap_or("127.0.0.1:8848")
+                cfg.mcp
+                    .as_ref()
+                    .map(|m| m.listen.as_str())
+                    .unwrap_or("127.0.0.1:8848")
             )
         }),
     );
@@ -735,6 +746,22 @@ async fn main() -> anyhow::Result<()> {
                         m.allow_all_users,
                         &m.allowed_users,
                     )),
+                    m.allowed_users.clone(),
+                ),
+            );
+        }
+
+        // Matrix keeps room/direct-room enforcement in the adapter because its
+        // room model is richer than the generic channel gate. The shared gate
+        // mirrors Matrix's explicit, deny-by-default MXID policy at L3.
+        if let Some(m) = &cfg.matrix {
+            reg.insert(
+                "matrix",
+                TrustConfig::new(
+                    Some(true),
+                    Vec::<String>::new(),
+                    Some(true),
+                    Some(m.allow_all_users),
                     m.allowed_users.clone(),
                 ),
             );
@@ -945,22 +972,21 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize filestore (for uploading file attachments to S3/R2).
     #[cfg(feature = "filestore")]
-    let filestore: Option<Arc<openab_core::filestore::Filestore>> = if let Some(ref fs_cfg) =
-        cfg.filestore
-    {
-        info!(
-            bucket = %fs_cfg.bucket,
-            region = %fs_cfg.region,
-            prefix = %fs_cfg.prefix,
-            presigned_ttl = fs_cfg.presigned_ttl,
-            "filestore enabled"
-        );
-        Some(Arc::new(
-            openab_core::filestore::Filestore::new(fs_cfg).await,
-        ))
-    } else {
-        None
-    };
+    let filestore: Option<Arc<openab_core::filestore::Filestore>> =
+        if let Some(ref fs_cfg) = cfg.filestore {
+            info!(
+                bucket = %fs_cfg.bucket,
+                region = %fs_cfg.region,
+                prefix = %fs_cfg.prefix,
+                presigned_ttl = fs_cfg.presigned_ttl,
+                "filestore enabled"
+            );
+            Some(Arc::new(
+                openab_core::filestore::Filestore::new(fs_cfg).await,
+            ))
+        } else {
+            None
+        };
 
     #[cfg(feature = "slack")]
     let shared_slack_adapter: Option<Arc<slack::SlackAdapter>> = cfg.slack.as_ref().map(|s| {
@@ -989,6 +1015,17 @@ async fn main() -> anyhow::Result<()> {
             None
         };
 
+    #[cfg(feature = "matrix")]
+    let shared_matrix_adapter: Option<Arc<matrix::MatrixAdapter>> = match cfg.matrix.as_ref() {
+        Some(matrix_cfg) => Some(Arc::new(matrix::MatrixAdapter::new(
+            matrix_cfg,
+            session_ttl_dur,
+        )?)),
+        None => None,
+    };
+    #[cfg(not(feature = "matrix"))]
+    let shared_matrix_adapter: Option<Arc<dyn adapter::ChatAdapter>> = None;
+
     // Shared slot for Discord ShardMessenger (set in ready handler, used by ctl for agent.status)
     #[cfg(unix)]
     let ctl_shard: ctl::ShardSlot = Arc::new(std::sync::OnceLock::new());
@@ -1014,6 +1051,9 @@ async fn main() -> anyhow::Result<()> {
                 a.clone() as Arc<dyn adapter::ChatAdapter>,
             );
         }
+        if let Some(ref a) = shared_matrix_adapter {
+            adapters.insert("matrix".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
+        }
         if adapters.is_empty() {
             None
         } else {
@@ -1038,18 +1078,16 @@ async fn main() -> anyhow::Result<()> {
     if cfg.mattermost.is_some() {
         configured_platforms.push("mattermost");
     }
+    #[cfg(feature = "matrix")]
+    if cfg.matrix.is_some() {
+        configured_platforms.push("matrix");
+    }
     #[cfg(feature = "telegram")]
     if cfg.telegram.is_some() || std::env::var("TELEGRAM_BOT_TOKEN").is_ok() {
         configured_platforms.push("telegram");
     }
     #[cfg(feature = "googlechat")]
-    if cfg
-        .googlechat
-        .clone()
-        .unwrap_or_default()
-        .resolve()
-        .enabled
-    {
+    if cfg.googlechat.clone().unwrap_or_default().resolve().enabled {
         configured_platforms.push("googlechat");
     }
     #[cfg(feature = "lineworks")]
@@ -1210,6 +1248,75 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "mattermost"))]
     let mattermost_handle: Option<tokio::task::JoinHandle<()>> = None;
 
+    // Spawn Matrix adapter (background task).
+    #[cfg(feature = "matrix")]
+    let matrix_handle = if let Some(matrix_cfg) = cfg.matrix {
+        if !matrix_cfg.allow_all_rooms && matrix_cfg.allowed_rooms.is_empty() {
+            warn!("Matrix room policy denies all rooms; set allowed_rooms or allow_all_rooms=true");
+        }
+        if !matrix_cfg.allow_all_users && matrix_cfg.allowed_users.is_empty() {
+            warn!("Matrix user policy denies all users; set allowed_users or allow_all_users=true");
+        }
+        info!(
+            allow_all_rooms = matrix_cfg.allow_all_rooms,
+            auto_join_invites = matrix_cfg.auto_join_invites,
+            allow_all_users = matrix_cfg.allow_all_users,
+            rooms = matrix_cfg.allowed_rooms.len(),
+            users = matrix_cfg.allowed_users.len(),
+            bot_users = matrix_cfg.bot_user_ids.len(),
+            trusted_bots = matrix_cfg.trusted_bot_ids.len(),
+            allow_bot_messages = ?matrix_cfg.allow_bot_messages,
+            allow_user_messages = ?matrix_cfg.allow_user_messages,
+            thread_replies = matrix_cfg.thread_replies,
+            "starting matrix adapter"
+        );
+        let run_config = matrix::MatrixRunConfig::from_config(&matrix_cfg);
+        let (matrix_cap, matrix_grouping, matrix_idle) = dispatch::dispatch_params(
+            &matrix_cfg.message_processing_mode,
+            matrix_cfg.max_buffered_messages,
+        );
+        let matrix_dispatcher = Arc::new(dispatch::Dispatcher::with_idle_timeout(
+            router.clone(),
+            matrix_cap,
+            matrix_cfg.max_batch_tokens,
+            matrix_grouping,
+            matrix_idle,
+        ));
+        dispatchers.lock().unwrap().push(matrix_dispatcher.clone());
+        let matrix_adapter = shared_matrix_adapter
+            .clone()
+            .expect("shared_matrix_adapter must exist when Matrix config is present");
+        // Matrix auth and the initial full-state sync are startup invariants:
+        // fail the process instead of leaving a Matrix-only deployment idle.
+        let matrix_since = matrix_adapter.initialize(&run_config).await?;
+        let matrix_router = router.clone();
+        let matrix_stt = cfg.stt.clone();
+        let matrix_shutdown_rx = shutdown_rx.clone();
+        #[cfg(feature = "filestore")]
+        let matrix_filestore = filestore.clone();
+        Some(tokio::spawn(async move {
+            if let Err(err) = matrix::run_matrix_adapter(
+                matrix_adapter,
+                matrix_router,
+                run_config,
+                matrix_since,
+                matrix_stt,
+                matrix_shutdown_rx,
+                matrix_dispatcher,
+                #[cfg(feature = "filestore")]
+                matrix_filestore,
+            )
+            .await
+            {
+                error!(error = %err, "matrix adapter error");
+            }
+        }))
+    } else {
+        None
+    };
+    #[cfg(not(feature = "matrix"))]
+    let matrix_handle: Option<tokio::task::JoinHandle<()>> = None;
+
     // Spawn Gateway adapter (background task)
     let gateway_handle = if let Some(gw_cfg) = cfg.gateway {
         let router = router.clone();
@@ -1243,15 +1350,15 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "filestore")]
         let gw_filestore = filestore.clone();
         Some(tokio::spawn(async move {
-            if let Err(e) =
-                gateway::run_gateway_adapter(
-                    params,
-                    shutdown_rx,
-                    gw_dispatcher,
-                    gw_router,
-                    #[cfg(feature = "filestore")]
-                    gw_filestore,
-                ).await
+            if let Err(e) = gateway::run_gateway_adapter(
+                params,
+                shutdown_rx,
+                gw_dispatcher,
+                gw_router,
+                #[cfg(feature = "filestore")]
+                gw_filestore,
+            )
+            .await
             {
                 error!("gateway adapter error: {e}");
             }
@@ -1330,7 +1437,6 @@ async fn main() -> anyhow::Result<()> {
                     },
                 ));
             }
-
 
             // First-class `[telegram]` config overrides env-derived values
             // (config-authoritative + ${} expansion + TELEGRAM_* env fallback).
@@ -1529,7 +1635,10 @@ async fn main() -> anyhow::Result<()> {
                         f.config.api_base(),
                         idle_ms,
                     ));
-                    info!(idle_ms, "unified: feishu card-streaming idle reaper started");
+                    info!(
+                        idle_ms,
+                        "unified: feishu card-streaming idle reaper started"
+                    );
                 }
                 if f.config.connection_mode == feishu::ConnectionMode::Websocket {
                     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1671,19 +1780,22 @@ async fn main() -> anyhow::Result<()> {
 
             info!(addr = %listen_addr, "unified webhook server starting");
 
-            (Some(tokio::spawn(async move {
-                let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
-                    Ok(l) => l,
-                    Err(e) => {
-                        error!(addr = %listen_addr, error = %e, "unified webhook server bind failed");
-                        return;
+            (
+                Some(tokio::spawn(async move {
+                    let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
+                        Ok(l) => l,
+                        Err(e) => {
+                            error!(addr = %listen_addr, error = %e, "unified webhook server bind failed");
+                            return;
+                        }
+                    };
+                    info!(addr = %listen_addr, "unified webhook server listening");
+                    if let Err(e) = axum::serve(listener, app).await {
+                        error!(error = %e, "unified webhook server error");
                     }
-                };
-                info!(addr = %listen_addr, "unified webhook server listening");
-                if let Err(e) = axum::serve(listener, app).await {
-                    error!(error = %e, "unified webhook server error");
-                }
-            })), Some(cron_unified_adapter))
+                })),
+                Some(cron_unified_adapter),
+            )
         } else {
             (None, None)
         }
@@ -1725,6 +1837,10 @@ async fn main() -> anyhow::Result<()> {
                 "mattermost".into(),
                 a.clone() as Arc<dyn adapter::ChatAdapter>,
             );
+        }
+        #[cfg(feature = "matrix")]
+        if let Some(ref a) = shared_matrix_adapter {
+            cron_adapters.insert("matrix".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
         }
         #[cfg(feature = "telegram")]
         if let Some(ref a) = shared_unified_adapter {
@@ -1926,6 +2042,9 @@ async fn main() -> anyhow::Result<()> {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
     }
     if let Some(handle) = mattermost_handle {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+    if let Some(handle) = matrix_handle {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
     }
     if let Some(handle) = gateway_handle {
@@ -2145,13 +2264,10 @@ allowed_users = ["u1"]
         assert_ne!(trust.decide("c2", false, "u1"), Decision::Allow);
 
         // Empty lists → allow-all (matching the old inline filter default).
-        let gw_open = config::parse_config_str(
-            "[gateway]\nurl = \"ws://gw:8080/ws\"\n",
-            "test",
-        )
-        .unwrap()
-        .gateway
-        .unwrap();
+        let gw_open = config::parse_config_str("[gateway]\nurl = \"ws://gw:8080/ws\"\n", "test")
+            .unwrap()
+            .gateway
+            .unwrap();
         let trust_open = gateway_section_trust(&gw_open);
         assert_eq!(trust_open.decide("any", false, "anyone"), Decision::Allow);
     }

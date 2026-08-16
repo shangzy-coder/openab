@@ -242,6 +242,7 @@ const VALID_PLATFORMS: &[&str] = &[
     "discord",
     "slack",
     "mattermost",
+    "matrix",
     "telegram",
     "googlechat",
     "lineworks",
@@ -258,10 +259,12 @@ fn should_create_cron_thread(job: &CronJobConfig) -> bool {
 }
 
 fn cron_sender_thread_id(channel: &ChannelRef) -> Option<String> {
-    channel
-        .thread_id
-        .clone()
-        .or_else(|| channel.parent_id.as_ref().map(|_| channel.channel_id.clone()))
+    channel.thread_id.clone().or_else(|| {
+        channel
+            .parent_id
+            .as_ref()
+            .map(|_| channel.channel_id.clone())
+    })
 }
 
 /// Validate all cronjob configs (fail-fast on bad cron expressions or timezones).
@@ -654,8 +657,7 @@ async fn fire_cronjob(
                 DisableOnSuccessResult::NotAchieved(reason) => {
                     info!(
                         id = job.id.as_deref().unwrap_or(""),
-                        reason,
-                        "disable_on_success not achieved, firing cronjob normally"
+                        reason, "disable_on_success not achieved, firing cronjob normally"
                     );
                 }
             }
@@ -732,7 +734,7 @@ async fn fire_cronjob(
         thread_id: cron_sender_thread_id(&reply_channel),
         is_bot: true,
         timestamp: Some(Utc::now().to_rfc3339()),
-        message_id: None, // cron jobs don't originate from a message
+        message_id: None,  // cron jobs don't originate from a message
         receiver_id: None, // cron jobs are self-triggered, no external receiver
     };
     let sender_json = match serde_json::to_string(&sender) {
@@ -1637,7 +1639,10 @@ message = "a"
             origin_event_id: None,
         };
 
-        assert_eq!(cron_sender_thread_id(&channel).as_deref(), Some("thread-456"));
+        assert_eq!(
+            cron_sender_thread_id(&channel).as_deref(),
+            Some("thread-456")
+        );
     }
 
     // --- validate_cronjobs tests ---
@@ -1680,6 +1685,15 @@ message = "a"
         job.disable_on_success = None;
         job.disable_on_success_match = None;
         assert!(validate_cronjobs(&[job], &["mattermost"]).is_ok());
+    }
+
+    #[test]
+    fn validate_cronjobs_matrix_passes_when_configured() {
+        let mut job = test_cron_job();
+        job.platform = "matrix".into();
+        job.disable_on_success = None;
+        job.disable_on_success_match = None;
+        assert!(validate_cronjobs(&[job], &["matrix"]).is_ok());
     }
 
     #[test]
@@ -1732,7 +1746,7 @@ message = "a"
             schedule: "* * * * *".into(),
             channel: "123".into(),
             message: "hi".into(),
-            platform: "matrix".into(),
+            platform: "unknown-platform".into(),
             sender_name: "test".into(),
             thread_id: None,
             timezone: "UTC".into(),
