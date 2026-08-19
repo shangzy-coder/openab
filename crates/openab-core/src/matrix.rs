@@ -13,13 +13,16 @@ use crate::media;
 use crate::trust::l3_gate_applies;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::{Method, RequestBuilder, Url};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{watch, Mutex, OnceCell};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -29,6 +32,7 @@ const CACHE_MAX_ENTRIES: usize = 1_000;
 const SEEN_EVENT_LIMIT: usize = 10_000;
 const MAX_ERROR_BODY_CHARS: usize = 1_000;
 const MATRIX_OUTBOUND_FILE_LIMIT: u64 = 50 * 1024 * 1024;
+const MATRIX_INBOUND_FILE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_MATRIX_INBOUND_COMPOSER_LANES: usize = 1_000;
 
 #[derive(Clone)]
@@ -383,6 +387,98 @@ struct MatrixAttachmentOutcome {
     audio_skipped: bool,
 }
 
+struct StoredMatrixAttachment {
+    path: PathBuf,
+    filename: String,
+    size: u64,
+}
+
+/// Creates and canonicalizes the dedicated local directory for inbound Matrix files.
+fn prepare_matrix_inbound_file_root(configured_root: Option<&str>) -> Result<Option<PathBuf>> {
+    let Some(configured_root) = configured_root else {
+        return Ok(None);
+    };
+    let requested = PathBuf::from(configured_root);
+    anyhow::ensure!(
+        requested.is_absolute(),
+        "matrix.inbound_file_root must be an absolute path"
+    );
+    let existed = requested.exists();
+    std::fs::create_dir_all(&requested)
+        .with_context(|| format!("failed to create matrix.inbound_file_root {configured_root}"))?;
+    #[cfg(unix)]
+    if !existed {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&requested, std::fs::Permissions::from_mode(0o700))
+            .context("failed to secure matrix.inbound_file_root permissions")?;
+    }
+    let root =
+        std::fs::canonicalize(&requested).context("failed to resolve matrix.inbound_file_root")?;
+    anyhow::ensure!(
+        root.is_dir(),
+        "matrix.inbound_file_root must be a directory"
+    );
+    Ok(Some(root))
+}
+
+/// Converts an untrusted Matrix filename into a flat, bounded local filename.
+fn sanitize_matrix_inbound_filename(filename: &str) -> String {
+    let basename = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("attachment");
+    let mut safe = String::with_capacity(basename.len().min(120));
+    let mut previous_was_separator = false;
+    for character in basename.chars().take(120) {
+        let allowed = character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-');
+        if allowed {
+            safe.push(character);
+            previous_was_separator = false;
+        } else if !previous_was_separator {
+            safe.push('_');
+            previous_was_separator = true;
+        }
+    }
+    let safe = safe.trim_matches(['.', '_']);
+    if safe.is_empty() {
+        "attachment".to_string()
+    } else {
+        safe.to_string()
+    }
+}
+
+/// Produces the explicit agent-facing marker for a user-provided local attachment.
+fn matrix_local_attachment_block(
+    attachment: &MatrixAttachment,
+    stored: &StoredMatrixAttachment,
+) -> ContentBlock {
+    let safe_mime: String = attachment
+        .mime_type
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || "/-+.;= ".contains(*character))
+        .take(100)
+        .collect();
+    let content_type = if safe_mime.is_empty() {
+        "application/octet-stream"
+    } else {
+        &safe_mime
+    };
+    ContentBlock::Text {
+        text: format!(
+            "[User-provided Matrix attachment]\n\
+             source: matrix_user_upload\n\
+             filename: {}\n\
+             content_type: {content_type}\n\
+             size_bytes: {}\n\
+             local_path: {}",
+            stored.filename,
+            stored.size,
+            stored.path.display()
+        ),
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct ReactionKey {
     room_id: String,
@@ -431,7 +527,10 @@ pub struct MatrixAdapter {
     session_ttl: Duration,
     thread_replies: bool,
     streaming: bool,
-    outbound_file_root: Option<std::path::PathBuf>,
+    outbound_file_root: Option<PathBuf>,
+    inbound_file_root: Option<PathBuf>,
+    inbound_file_max_size: u64,
+    inbound_file_ttl: Duration,
     participated_threads: Mutex<HashMap<String, tokio::time::Instant>>,
     multibot_threads: Mutex<HashMap<String, tokio::time::Instant>>,
     direct_rooms: Mutex<HashSet<String>>,
@@ -469,6 +568,18 @@ impl MatrixAdapter {
                 "matrix.outbound_file_root must be a directory"
             );
         }
+        anyhow::ensure!(
+            (1..=500).contains(&config.inbound_file_max_size_mb),
+            "matrix.inbound_file_max_size_mb must be between 1 and 500"
+        );
+        anyhow::ensure!(
+            (60..=604_800).contains(&config.inbound_file_ttl_seconds),
+            "matrix.inbound_file_ttl_seconds must be between 60 and 604800"
+        );
+        let inbound_file_root =
+            prepare_matrix_inbound_file_root(config.inbound_file_root.as_deref())?;
+        let inbound_file_max_size = config.inbound_file_max_size_mb * 1024 * 1024;
+        let inbound_file_ttl = Duration::from_secs(config.inbound_file_ttl_seconds);
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(20))
             .timeout(sync_timeout + Duration::from_secs(15))
@@ -487,6 +598,9 @@ impl MatrixAdapter {
             thread_replies: config.thread_replies,
             streaming: config.streaming,
             outbound_file_root,
+            inbound_file_root,
+            inbound_file_max_size,
+            inbound_file_ttl,
             participated_threads: Mutex::new(HashMap::new()),
             multibot_threads: Mutex::new(HashMap::new()),
             direct_rooms: Mutex::new(HashSet::new()),
@@ -575,6 +689,156 @@ impl MatrixAdapter {
         segments.extend(["v1", "media", "download", &server_name, media_id]);
         drop(segments);
         Ok(url)
+    }
+
+    /// Removes expired files created by the Matrix inbound local-file path.
+    async fn cleanup_expired_inbound_files(&self) {
+        let Some(root) = self.inbound_file_root.as_ref() else {
+            return;
+        };
+        let mut entries = match tokio::fs::read_dir(root).await {
+            Ok(entries) => entries,
+            Err(err) => {
+                warn!(path = %root.display(), error = %err, "failed to scan Matrix inbound file root");
+                return;
+            }
+        };
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(err) => {
+                    warn!(path = %root.display(), error = %err, "failed to read Matrix inbound file entry");
+                    break;
+                }
+            };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let generated = name.starts_with("matrix_") || name.starts_with(".matrix_");
+            if !generated {
+                continue;
+            }
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata().await else {
+                continue;
+            };
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+            let Ok(age) = modified.elapsed() else {
+                continue;
+            };
+            if age < self.inbound_file_ttl {
+                continue;
+            }
+            if let Err(err) = tokio::fs::remove_file(entry.path()).await {
+                warn!(path = %entry.path().display(), error = %err, "failed to remove expired Matrix inbound file");
+            }
+        }
+    }
+
+    /// Downloads one authenticated Matrix attachment into the configured shared local root.
+    async fn store_inbound_attachment(
+        &self,
+        attachment: &MatrixAttachment,
+        download_url: &Url,
+    ) -> Result<StoredMatrixAttachment> {
+        let root = self
+            .inbound_file_root
+            .as_ref()
+            .ok_or_else(|| anyhow!("matrix.inbound_file_root is not configured"))?;
+        anyhow::ensure!(
+            attachment.size <= self.inbound_file_max_size,
+            "attachment exceeds the configured local file limit"
+        );
+        self.cleanup_expired_inbound_files().await;
+
+        let response = self
+            .authorized(Method::GET, download_url.clone())?
+            .timeout(MATRIX_INBOUND_FILE_DOWNLOAD_TIMEOUT)
+            .send()
+            .await
+            .context("Matrix attachment download failed")?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "Matrix attachment download returned HTTP {}",
+            response.status()
+        );
+        if let Some(content_length) = response.content_length() {
+            anyhow::ensure!(
+                content_length <= self.inbound_file_max_size,
+                "attachment exceeds the configured local file limit"
+            );
+        }
+
+        let safe_filename = sanitize_matrix_inbound_filename(&attachment.filename);
+        let file_id = Uuid::new_v4();
+        let final_path = root.join(format!("matrix_{file_id}_{safe_filename}"));
+        let partial_path = root.join(format!(".matrix_{file_id}.part"));
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&partial_path)
+            .await
+            .context("failed to create local Matrix attachment")?;
+        let mut stream = response.bytes_stream();
+        let max_size = self.inbound_file_max_size;
+        let download = async {
+            let mut actual_size = 0u64;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.context("failed to read Matrix attachment body")?;
+                actual_size = actual_size
+                    .checked_add(chunk.len() as u64)
+                    .ok_or_else(|| anyhow!("Matrix attachment size overflow"))?;
+                anyhow::ensure!(
+                    actual_size <= max_size,
+                    "attachment exceeds the configured local file limit"
+                );
+                file.write_all(&chunk)
+                    .await
+                    .context("failed to write local Matrix attachment")?;
+            }
+            file.flush()
+                .await
+                .context("failed to flush local Matrix attachment")?;
+            Ok::<u64, anyhow::Error>(actual_size)
+        };
+        let download_result =
+            tokio::time::timeout(MATRIX_INBOUND_FILE_DOWNLOAD_TIMEOUT, download).await;
+        drop(file);
+        let actual_size = match download_result {
+            Ok(Ok(actual_size)) => actual_size,
+            Ok(Err(err)) => {
+                let _ = tokio::fs::remove_file(&partial_path).await;
+                return Err(err);
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&partial_path).await;
+                anyhow::bail!("Matrix attachment download timed out");
+            }
+        };
+        if let Err(err) = tokio::fs::rename(&partial_path, &final_path).await {
+            let _ = tokio::fs::remove_file(&partial_path).await;
+            return Err(err).context("failed to finalize local Matrix attachment");
+        }
+        info!(
+            filename = %safe_filename,
+            size = actual_size,
+            path = %final_path.display(),
+            "Matrix attachment stored for local agent"
+        );
+        Ok(StoredMatrixAttachment {
+            path: final_path,
+            filename: safe_filename,
+            size: actual_size,
+        })
     }
 
     fn media_upload_url(&self) -> Result<Url> {
@@ -1176,6 +1440,26 @@ async fn process_matrix_attachment(
             return outcome;
         }
     };
+
+    if attachment.kind != MatrixAttachmentKind::Image && adapter.inbound_file_root.is_some() {
+        match adapter
+            .store_inbound_attachment(attachment, &download_url)
+            .await
+        {
+            Ok(stored) => outcome
+                .blocks
+                .push(matrix_local_attachment_block(attachment, &stored)),
+            Err(err) => {
+                warn!(filename = %attachment.filename, error = %err, "Matrix attachment local storage failed");
+                outcome.warning = Some(format!(
+                    "⚠️ I couldn't store `{}` for the local agent: {err}.",
+                    sanitize_matrix_inbound_filename(&attachment.filename)
+                ));
+            }
+        }
+        return outcome;
+    }
+
     let download_url = download_url.as_str();
     let token = Some(adapter.access_token.as_str());
 
@@ -1317,6 +1601,7 @@ pub async fn run_matrix_adapter(
         config.inbound_media_coalesce_max_events,
     );
     let mut backoff_secs = 1u64;
+    adapter.cleanup_expired_inbound_files().await;
 
     loop {
         if *shutdown_rx.borrow() {
@@ -1413,6 +1698,7 @@ pub async fn run_matrix_adapter(
             }
         };
         backoff_secs = 1;
+        adapter.cleanup_expired_inbound_files().await;
         adapter.apply_sync_metadata(&sync).await;
         adapter.join_invited_rooms(&sync, &config).await;
 
@@ -2322,6 +2608,40 @@ mod tests {
         }
     }
 
+    /// Serves one authenticated Matrix media response and returns the captured request.
+    async fn serve_matrix_media_once(
+        body: Vec<u8>,
+        content_type: &'static str,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            let _ = stream.write_all(&body).await;
+            String::from_utf8(request).unwrap()
+        });
+        (address, server)
+    }
+
     #[test]
     fn normalizes_homeserver_api_path() {
         let url = normalize_homeserver_url("https://matrix.example.com/base/").unwrap();
@@ -2876,6 +3196,236 @@ inbound_media_coalesce_ms = 2000
         assert!(adapter
             .media_download_url("mxc://remote.example.com/a/b")
             .is_err());
+    }
+
+    /// Verifies text, audio, and video become safe local user-attachment paths.
+    #[tokio::test]
+    async fn stores_every_non_image_attachment_in_the_configured_local_root() {
+        let root = tempfile::tempdir().unwrap();
+        let stale_path = root.path().join("matrix_stale.txt");
+        std::fs::write(&stale_path, "stale").unwrap();
+        std::fs::File::open(&stale_path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(120))
+            .unwrap();
+        let unrelated_path = root.path().join("keep.txt");
+        std::fs::write(&unrelated_path, "keep").unwrap();
+
+        let cases = [
+            (
+                MatrixAttachmentKind::File,
+                "../../notes.txt",
+                "text/plain",
+                b"hello from Matrix".to_vec(),
+            ),
+            (
+                MatrixAttachmentKind::Audio,
+                "voice.ogg",
+                "audio/ogg",
+                b"audio bytes".to_vec(),
+            ),
+            (
+                MatrixAttachmentKind::Video,
+                "clip.mp4",
+                "video/mp4",
+                b"video bytes".to_vec(),
+            ),
+        ];
+
+        for (index, (kind, filename, mime_type, body)) in cases.into_iter().enumerate() {
+            let (address, server) = serve_matrix_media_once(body.clone(), mime_type).await;
+            let cfg: MatrixConfig = toml::from_str(&format!(
+                "homeserver_url = \"http://{address}\"\naccess_token = \"media-token\"\ninbound_file_root = {:?}\ninbound_file_max_size_mb = 1\ninbound_file_ttl_seconds = 60\n",
+                root.path().to_string_lossy()
+            ))
+            .unwrap();
+            let adapter = MatrixAdapter::new(&cfg, Duration::from_secs(60)).unwrap();
+            let attachment = MatrixAttachment {
+                kind,
+                filename: filename.into(),
+                mime_type: mime_type.into(),
+                size: body.len() as u64,
+                mxc_uri: format!("mxc://remote.example.com/media-{index}"),
+            };
+            let outcome = process_matrix_attachment(
+                &adapter,
+                &attachment,
+                &SttConfig::default(),
+                #[cfg(feature = "filestore")]
+                None,
+            )
+            .await;
+
+            assert!(outcome.warning.is_none());
+            assert!(!outcome.audio_skipped);
+            assert!(outcome.echo_entries.is_empty());
+            assert_eq!(outcome.blocks.len(), 1);
+            let ContentBlock::Text { text } = &outcome.blocks[0] else {
+                panic!("expected local attachment path block");
+            };
+            assert!(text.starts_with("[User-provided Matrix attachment]"));
+            assert!(text.contains(&format!("content_type: {mime_type}")));
+            assert!(!text.contains("mxc://"));
+            assert!(!text.contains("media-token"));
+            let local_path = text
+                .lines()
+                .find_map(|line| line.strip_prefix("local_path: "))
+                .expect("local attachment block must include a path");
+            let local_path = std::path::Path::new(local_path);
+            assert_eq!(
+                local_path.parent(),
+                Some(std::fs::canonicalize(root.path()).unwrap().as_path())
+            );
+            assert!(!local_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(".."));
+            assert_eq!(std::fs::read(local_path).unwrap(), body);
+
+            let request = server.await.unwrap();
+            assert!(request.contains(&format!(
+                "/_matrix/client/v1/media/download/remote.example.com/media-{index}"
+            )));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer media-token"));
+        }
+
+        assert!(!stale_path.exists());
+        assert!(unrelated_path.exists());
+    }
+
+    /// Verifies an advertised over-limit size prevents any network download.
+    #[tokio::test]
+    async fn rejects_oversized_local_attachment_before_downloading() {
+        let root = tempfile::tempdir().unwrap();
+        let cfg: MatrixConfig = toml::from_str(&format!(
+            "homeserver_url = \"http://127.0.0.1:9\"\naccess_token = \"media-token\"\ninbound_file_root = {:?}\ninbound_file_max_size_mb = 1\n",
+            root.path().to_string_lossy()
+        ))
+        .unwrap();
+        let adapter = MatrixAdapter::new(&cfg, Duration::from_secs(60)).unwrap();
+        let attachment = MatrixAttachment {
+            kind: MatrixAttachmentKind::File,
+            filename: "oversized.pdf".into(),
+            mime_type: "application/pdf".into(),
+            size: 1024 * 1024 + 1,
+            mxc_uri: "mxc://remote.example.com/oversized".into(),
+        };
+        let outcome = process_matrix_attachment(
+            &adapter,
+            &attachment,
+            &SttConfig::default(),
+            #[cfg(feature = "filestore")]
+            None,
+        )
+        .await;
+
+        assert!(outcome.blocks.is_empty());
+        assert!(outcome
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("exceeds the configured local file limit")));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    /// Verifies a server-declared over-limit body is rejected before local creation.
+    #[tokio::test]
+    async fn rejects_response_body_declared_over_the_local_limit() {
+        let oversized = vec![b'x'; 1024 * 1024 + 1];
+        let (address, server) = serve_matrix_media_once(oversized, "application/pdf").await;
+        let root = tempfile::tempdir().unwrap();
+        let cfg: MatrixConfig = toml::from_str(&format!(
+            "homeserver_url = \"http://{address}\"\naccess_token = \"media-token\"\ninbound_file_root = {:?}\ninbound_file_max_size_mb = 1\n",
+            root.path().to_string_lossy()
+        ))
+        .unwrap();
+        let adapter = MatrixAdapter::new(&cfg, Duration::from_secs(60)).unwrap();
+        let attachment = MatrixAttachment {
+            kind: MatrixAttachmentKind::File,
+            filename: "unknown-size.pdf".into(),
+            mime_type: "application/pdf".into(),
+            size: 0,
+            mxc_uri: "mxc://remote.example.com/unknown-size".into(),
+        };
+        let outcome = process_matrix_attachment(
+            &adapter,
+            &attachment,
+            &SttConfig::default(),
+            #[cfg(feature = "filestore")]
+            None,
+        )
+        .await;
+
+        assert!(outcome.blocks.is_empty());
+        assert!(outcome
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("exceeds the configured local file limit")));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        let request = server.await.unwrap();
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer media-token"));
+    }
+
+    /// Verifies local attachment roots cannot depend on the process working directory.
+    #[test]
+    fn rejects_relative_matrix_inbound_file_root() {
+        let cfg: MatrixConfig = toml::from_str(
+            "homeserver_url = \"http://127.0.0.1:9\"\naccess_token = \"token\"\ninbound_file_root = \"relative/incoming\"\n",
+        )
+        .unwrap();
+        let err = match MatrixAdapter::new(&cfg, Duration::from_secs(60)) {
+            Ok(_) => panic!("relative inbound root must be rejected"),
+            Err(err) => err,
+        };
+        assert!(err
+            .to_string()
+            .contains("matrix.inbound_file_root must be an absolute path"));
+    }
+
+    /// Verifies local file mode never replaces the ACP image content block.
+    #[tokio::test]
+    async fn keeps_images_on_the_acp_image_path_when_local_files_are_enabled() {
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let (address, server) = serve_matrix_media_once(png.clone(), "image/png").await;
+        let root = tempfile::tempdir().unwrap();
+        let cfg: MatrixConfig = toml::from_str(&format!(
+            "homeserver_url = \"http://{address}\"\naccess_token = \"media-token\"\ninbound_file_root = {:?}\n",
+            root.path().to_string_lossy()
+        ))
+        .unwrap();
+        let adapter = MatrixAdapter::new(&cfg, Duration::from_secs(60)).unwrap();
+        let attachment = MatrixAttachment {
+            kind: MatrixAttachmentKind::Image,
+            filename: "photo.png".into(),
+            mime_type: "image/png".into(),
+            size: png.len() as u64,
+            mxc_uri: "mxc://remote.example.com/photo".into(),
+        };
+        let outcome = process_matrix_attachment(
+            &adapter,
+            &attachment,
+            &SttConfig::default(),
+            #[cfg(feature = "filestore")]
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome.blocks.as_slice(),
+            [ContentBlock::Image { .. }]
+        ));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        let request = server.await.unwrap();
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer media-token"));
     }
 
     #[test]

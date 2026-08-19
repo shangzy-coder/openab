@@ -161,6 +161,9 @@ Matrix Client-Server API adapter. It authenticates with an access token and rece
 | `sync_timeout_seconds` | u64 | `30` | `/sync` long-poll timeout; must be between 1 and 60. |
 | `thread_replies` | bool | `true` | Reply to top-level triggers in an `m.thread`. Set `false` to keep replies top-level; messages received inside an existing thread still receive in-thread replies. |
 | `outbound_file_root` | string \| omit | disabled | Opt in to Matrix-native agent file uploads. Only regular files that canonicalize beneath this directory can be uploaded; maximum 50 MiB. |
+| `inbound_file_root` | string \| omit | disabled | Absolute shared-filesystem directory for non-image user attachments. When enabled, text, audio, video, PDF, DOCX, ZIP, and other files are downloaded here and represented to the local agent by an explicit path instead of inline text, STT, MXC metadata, or filestore URL. Use only when OpenAB and the agent share this filesystem. |
+| `inbound_file_max_size_mb` | u64 | `250` | Per-file local download limit; `1`–`500` MiB. Both advertised and streamed sizes are enforced. |
+| `inbound_file_ttl_seconds` | u64 | `86400` | Retention for generated local files; `60`–`604800` seconds. Cleanup runs before writes, at Matrix adapter startup, and after successful syncs. |
 | `streaming` | bool | `true` | Stream with a placeholder followed by Matrix `m.replace` edits. Disabled when another configured bot is present. |
 | `inbound_media_coalesce_ms` | u64 | `0` | Opt-in wait window for reconstructing media-first input bursts. A media event starts the window, subsequent media reset it, the first following text event flushes immediately, and pure media flushes on timeout. `0` preserves immediate per-event dispatch; maximum `60000`. |
 | `inbound_media_coalesce_max_events` | u32 | `10` | Maximum media/text events in one reconstructed input; `1`–`100`. Reaching the cap flushes immediately. |
@@ -179,6 +182,10 @@ allowed_users = ["@alice:example.com"]
 allow_bot_messages = "off"
 thread_replies = true
 # outbound_file_root = "/workspace"
+# For a local agent in the same container/pod:
+# inbound_file_root = "/workspace/.openab/incoming"
+# inbound_file_max_size_mb = 250
+# inbound_file_ttl_seconds = 86400
 streaming = true
 # inbound_media_coalesce_ms = 2000
 # inbound_media_coalesce_max_events = 10

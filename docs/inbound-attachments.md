@@ -28,6 +28,7 @@ User sends media (photo/voice/file)
 | **LINE** | ✅ (LINE-hosted only) | ✅ (STT, 1:1 only, LINE-hosted only) | — | — | — |
 | **LINE WORKS** | ✅ | ✅ (STT) | ✅ (whitelist) | skipped | skipped |
 | **Slack** | ✅ | ✅ (STT) | ✅ | — | skipped |
+| **Matrix** | ✅ (ACP image) | ✅ (local path or STT) | ✅ (local path or inline) | ✅ (local path or metadata) | ✅ with local path or filestore |
 
 ## Processing Pipeline
 
@@ -64,7 +65,11 @@ LINE-specific note:
 
 ### Unsupported Types
 
-Binary files (zip, pdf, exe, docx), video, and stickers are **rejected with a status reason**. The agent receives a `[System: attachment "..." was not delivered — unsupported format: ...]` notification so it can inform the user.
+Binary files (zip, pdf, exe, docx), video, and stickers are **rejected with a status reason** by gateway adapters that do not support generic files. The agent receives a `[System: attachment "..." was not delivered — unsupported format: ...]` notification so it can inform the user. Matrix is an exception: its opt-in local-agent mode can store every non-image attachment on a filesystem shared with the agent.
+
+### Matrix Local-Agent Files
+
+Set `matrix.inbound_file_root` when Matrix OpenAB and its agent run in the same container or pod. OpenAB keeps images on the ACP image path and writes every non-image attachment to the configured absolute directory. The agent receives a structured user-attachment marker with the local path; it does not receive the Matrix token or `mxc://` URI. The default per-file cap is 250 MiB and the default retention is 24 hours. See [Matrix](matrix.md#attachments-and-media).
 
 ## Size Limits
 

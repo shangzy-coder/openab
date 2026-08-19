@@ -733,6 +733,15 @@ pub struct MatrixConfig {
     /// Optional directory from which the Matrix adapter may upload agent-requested files.
     /// Paths are canonicalized and cannot escape this root. Default: disabled.
     pub outbound_file_root: Option<String>,
+    /// Optional shared directory where non-image Matrix attachments are stored for the local agent.
+    /// The directory is created and canonicalized at startup. Default: disabled.
+    pub inbound_file_root: Option<String>,
+    /// Maximum size of one locally stored inbound attachment in MiB. Default: 250 MiB.
+    #[serde(default = "default_matrix_inbound_file_max_size_mb")]
+    pub inbound_file_max_size_mb: u64,
+    /// Retention period for locally stored inbound attachments. Default: 24 hours.
+    #[serde(default = "default_matrix_inbound_file_ttl_seconds")]
+    pub inbound_file_ttl_seconds: u64,
     /// Stream replies by sending a placeholder and Matrix `m.replace` edits.
     #[serde(default = "default_true")]
     pub streaming: bool,
@@ -757,6 +766,16 @@ fn default_matrix_sync_timeout_seconds() -> u64 {
 
 fn default_matrix_inbound_media_coalesce_max_events() -> usize {
     10
+}
+
+/// Returns the default per-file cap for Matrix attachments stored on local disk.
+fn default_matrix_inbound_file_max_size_mb() -> u64 {
+    250
+}
+
+/// Returns the default retention period for Matrix attachments stored on local disk.
+fn default_matrix_inbound_file_ttl_seconds() -> u64 {
+    86_400
 }
 
 #[derive(Debug, Deserialize)]
@@ -2459,6 +2478,14 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
             (1..=100).contains(&m.inbound_media_coalesce_max_events),
             "matrix.inbound_media_coalesce_max_events must be between 1 and 100"
         );
+        anyhow::ensure!(
+            (1..=500).contains(&m.inbound_file_max_size_mb),
+            "matrix.inbound_file_max_size_mb must be between 1 and 500"
+        );
+        anyhow::ensure!(
+            (60..=604_800).contains(&m.inbound_file_ttl_seconds),
+            "matrix.inbound_file_ttl_seconds must be between 60 and 604800"
+        );
     }
     if let Some(ref g) = config.gateway {
         anyhow::ensure!(
@@ -4026,6 +4053,9 @@ command = "echo"
         assert_eq!(cfg.sync_timeout_seconds, 30);
         assert!(cfg.thread_replies);
         assert!(cfg.outbound_file_root.is_none());
+        assert!(cfg.inbound_file_root.is_none());
+        assert_eq!(cfg.inbound_file_max_size_mb, 250);
+        assert_eq!(cfg.inbound_file_ttl_seconds, 86_400);
         assert!(cfg.streaming);
         assert_eq!(cfg.inbound_media_coalesce_ms, 0);
         assert_eq!(cfg.inbound_media_coalesce_max_events, 10);
@@ -4044,6 +4074,9 @@ allowed_users = ["@alice:example.com"]
 bot_user_ids = ["@bot:example.com"]
 thread_replies = false
 outbound_file_root = "/workspace"
+inbound_file_root = "/workspace/.openab/incoming"
+inbound_file_max_size_mb = 64
+inbound_file_ttl_seconds = 7200
 streaming = false
 inbound_media_coalesce_ms = 2000
 inbound_media_coalesce_max_events = 12
@@ -4061,6 +4094,12 @@ command = "echo"
         assert_eq!(matrix.bot_user_ids, vec!["@bot:example.com"]);
         assert!(!matrix.thread_replies);
         assert_eq!(matrix.outbound_file_root.as_deref(), Some("/workspace"));
+        assert_eq!(
+            matrix.inbound_file_root.as_deref(),
+            Some("/workspace/.openab/incoming")
+        );
+        assert_eq!(matrix.inbound_file_max_size_mb, 64);
+        assert_eq!(matrix.inbound_file_ttl_seconds, 7200);
         assert!(!matrix.streaming);
         assert_eq!(matrix.inbound_media_coalesce_ms, 2000);
         assert_eq!(matrix.inbound_media_coalesce_max_events, 12);
@@ -4115,6 +4154,42 @@ command = "echo"
         assert!(err
             .to_string()
             .contains("matrix.inbound_media_coalesce_max_events must be between 1 and 100"));
+
+        let err = parse_config(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example.com"
+access_token = "token"
+inbound_file_root = "/workspace/.openab/incoming"
+inbound_file_max_size_mb = 0
+
+[agent]
+command = "echo"
+"#,
+            "test",
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("matrix.inbound_file_max_size_mb must be between 1 and 500"));
+
+        let err = parse_config(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example.com"
+access_token = "token"
+inbound_file_root = "/workspace/.openab/incoming"
+inbound_file_ttl_seconds = 59
+
+[agent]
+command = "echo"
+"#,
+            "test",
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("matrix.inbound_file_ttl_seconds must be between 60 and 604800"));
     }
 
     #[test]

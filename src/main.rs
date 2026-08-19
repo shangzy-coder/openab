@@ -1268,6 +1268,9 @@ async fn main() -> anyhow::Result<()> {
             allow_bot_messages = ?matrix_cfg.allow_bot_messages,
             allow_user_messages = ?matrix_cfg.allow_user_messages,
             thread_replies = matrix_cfg.thread_replies,
+            inbound_file_root = matrix_cfg.inbound_file_root.as_deref().unwrap_or("disabled"),
+            inbound_file_max_size_mb = matrix_cfg.inbound_file_max_size_mb,
+            inbound_file_ttl_seconds = matrix_cfg.inbound_file_ttl_seconds,
             inbound_media_coalesce_ms = matrix_cfg.inbound_media_coalesce_ms,
             inbound_media_coalesce_max_events = matrix_cfg.inbound_media_coalesce_max_events,
             "starting matrix adapter"

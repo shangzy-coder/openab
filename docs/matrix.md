@@ -46,6 +46,10 @@ allow_user_messages = "multibot-mentions"
 sync_timeout_seconds = 30
 thread_replies = true
 # outbound_file_root = "/workspace"
+# Local-agent mode: OpenAB and the agent must share this absolute path.
+# inbound_file_root = "/workspace/.openab/incoming"
+# inbound_file_max_size_mb = 250
+# inbound_file_ttl_seconds = 86400
 streaming = true
 # Optional: reconstruct file/image-first input bursts before one ACP turn.
 # inbound_media_coalesce_ms = 2000
@@ -95,14 +99,20 @@ A non-zero window adds that much latency to pure media input. Pending composer s
 
 Matrix uses authenticated media downloads through `/_matrix/client/v1/media/download`. The access token is sent only to the configured homeserver; the remote server name and media ID from `mxc://` are encoded as path segments, so an event cannot redirect the bearer token to another host.
 
-Inbound handling follows the same shared `media`, `stt`, and optional `filestore` paths used by Slack and Discord:
+Images always use the ACP image path:
 
 - `m.image`: download, validate PNG/JPEG/GIF/WebP bytes, resize/compress, and send an ACP image block. The image cap is 10 MB.
-- Text `m.file`: inline recognized text formats up to 512 KB.
-- Other `m.file`: upload to the configured S3/R2 `[filestore]` and pass a temporary presigned URL to the agent. Without filestore, the user receives an explicit warning.
-- `m.audio`: transcribe through `[stt]` when enabled and optionally echo the transcript. The audio cap is 25 MB; when STT is disabled, OpenAB adds the configured microphone status reaction and does not invent a transcript.
-- `m.video`: pass filename, MIME, size, and MXC metadata to the agent, matching the current Slack behavior.
-- Encrypted attachment objects are rejected because the Matrix MVP has no Olm/Megolm or attachment-key store.
+
+For non-image media, choose one of two modes:
+
+- **Local-agent mode:** set `inbound_file_root` to an absolute directory shared by OpenAB and the agent, such as `/workspace/.openab/incoming` when both run in one container. Every non-image attachment—including text, audio, video, PDF, DOCX, and ZIP—is downloaded to that directory. The agent receives an explicit `[User-provided Matrix attachment]` block containing `source: matrix_user_upload`, sanitized filename, MIME, actual size, and absolute `local_path`. In this mode OpenAB does not inline text, transcribe audio, expose `mxc://`, or route these files through filestore.
+- **Legacy/remote-agent mode:** omit `inbound_file_root`. Text `m.file` content up to 512 KB is inlined; larger text and generic files use `[filestore]` when configured; audio uses `[stt]`; video is represented by metadata. This preserves existing and remote-agent behavior.
+
+Local-agent mode creates the configured root at startup and canonicalizes it. The configured path must be absolute. Stored names use a generated UUID plus a flattened ASCII filename, files are created with mode `0600` on Unix, and both advertised and streamed bytes are checked against `inbound_file_max_size_mb` (default 250 MiB, maximum 500 MiB). Generated files expire after `inbound_file_ttl_seconds` (default 24 hours); cleanup runs before writes, at adapter startup, and after successful Matrix syncs. Use a dedicated directory because cleanup intentionally owns generated `matrix_*` files in that root.
+
+This local path is valid only when the agent shares the same filesystem. Remote ACP or AgentCore deployments must leave it disabled and use filestore. Matrix credentials remain inside OpenAB in both modes; the agent never needs the access token.
+
+Encrypted attachment objects are rejected because the Matrix MVP has no Olm/Megolm or attachment-key store.
 
 ### Agent-generated outbound files
 
