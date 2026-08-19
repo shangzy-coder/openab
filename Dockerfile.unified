@@ -479,8 +479,8 @@ CMD ["openab", "run", "-c", "/etc/openab/config.toml"]
 # Target: pi
 # =============================================================================
 FROM base-node AS pi
-ARG PI_ACP_VERSION=0.0.31
-ARG PI_CODING_AGENT_VERSION=0.79.9
+ARG PI_ACP_VERSION=0.0.33
+ARG PI_CODING_AGENT_VERSION=0.84.2
 RUN npm install -g pi-acp@${PI_ACP_VERSION} @earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION} --fetch-retries=3
 ENV HOME=/home/node
 WORKDIR /home/node

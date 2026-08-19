@@ -116,8 +116,9 @@ jobs:
           test -n "$PI_ACP_VERSION" && test -n "$PI_CODING_AGENT_VERSION"
           docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' openab-unified-pi:test \
             | grep -Fx 'OPENAB_AGENT_COMMAND=pi-acp'
-          docker run --rm --entrypoint pi-acp openab-unified-pi:test --version \
-            | grep -F "$PI_ACP_VERSION"
+          docker run --rm --entrypoint node openab-unified-pi:test \
+            -e 'console.log(require("/usr/local/lib/node_modules/pi-acp/package.json").version)' \
+            | grep -Fx "$PI_ACP_VERSION"
           docker run --rm --entrypoint node openab-unified-pi:test \
             -e 'console.log(require("/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/package.json").version)' \
             | grep -Fx "$PI_CODING_AGENT_VERSION"
